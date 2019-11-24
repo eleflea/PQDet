@@ -1,0 +1,15 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# dataset
+data/*
+
+# eval
+eval/results/*
+
+# backbone & weights
+weights/*
+!weights/pretrained
+weights/pretrained/*
