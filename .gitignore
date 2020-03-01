@@ -5,6 +5,7 @@ __pycache__/
 
 # dataset
 data/*
+!data/presents
 
 # eval
 eval/results/*

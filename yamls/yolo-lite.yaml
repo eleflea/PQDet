@@ -1,0 +1,12 @@
+experiment_name: 'cpu_test'
+
+system:
+  gpus: []
+  num_workers: 2
+
+dataset:
+  train_txt_file: 'D:\Downloads\VOC\train.txt'
+  eval_txt_file: 'D:\Downloads\VOC\2007_test.txt'
+
+train:
+  batch_size: 2
