@@ -31,23 +31,22 @@ def main(args):
     class_names = cfg.dataset.classes
     device = torch.device('cpu')
 
-    model = YOLOv3('model/cfg/mobilenetv2-yolo.cfg')
+    model = YOLOv3(args.cfg)
     # print(model)
     state_dict = torch.load(args.weight, map_location=device)
-    model.load_state_dict(state_dict['model'])
+    torch.nn.DataParallel(model).load_state_dict(state_dict['model'])
+    model.to(device)
 
     image = cv2.imread(args.img)
     # pylint: disable-msg=not-callable
     original_size = torch.tensor(image.shape[:2], device=device, dtype=torch.float32)
     input_size = torch.tensor([args.size, args.size], device=device, dtype=torch.float32)
     preprocess = augment.Compose([
-        augment.ToTensor(device),
         augment.Resize([args.size, args.size]),
-        # augment.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        augment.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        augment.ToTensor(device),
     ])
     input_image = preprocess(image, [])[0].unsqueeze_(0)
-    # input_image = tools.img_preprocess2(image, None, (args.size, args.size), False)
-    # input_image = torch.from_numpy(input_image[None, ...]).float()
 
     model.eval()
     with torch.no_grad():
@@ -77,6 +76,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="test configuration")
+    parser.add_argument('--cfg', help='model cfg file')
     parser.add_argument('--weight', help='model weight')
 
     parser.add_argument('--size', help='test image size', type=int, default=512)

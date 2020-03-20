@@ -1,17 +1,31 @@
-from typing import Sequence
+from typing import Sequence, Optional
 from xml.etree.ElementTree import parse
 
 import numpy as np
 import cv2
 
 class SampleGetter:
+    '''get sample by image path
 
-    def __init__(self, classes: Sequence[str], train: bool=True):
-        self.classes = classes
-        self.parser = VOCXmlParser(self.classes, train)
+    mode: in 'train', 'eval' or 'test'
+    '''
+
+    def __init__(self, classes: Optional[Sequence[str]], mode: str='train'):
+        self.caller = self.test
+        if mode != 'test':
+            self.parser = VOCXmlParser(classes, mode == 'train')
+            self.caller = self.train_eval
 
     def __call__(self, img_path: str):
+        return self.caller(img_path)
+
+    def test(self, img_path: str):
         image = cv2.imread(img_path)
+        return cv2.cvtColor(image, cv2.COLOR_BGR2RGB), image.shape[:2]
+
+    def train_eval(self, img_path: str):
+        image = cv2.imread(img_path)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         label_path = img_path.replace('JPEGImages', 'Annotations').replace('.jpg', '.xml')
         label = self.parser(label_path)
         return image, label

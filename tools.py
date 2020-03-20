@@ -1,42 +1,10 @@
 import torch
-import cv2
+from time import time_ns
 import numpy as np
 from abc import ABCMeta, abstractmethod
 from typing import Any, TypeVar, Callable, Optional
 import heapq
 
-def img_preprocess2(image, bboxes, target_shape, correct_box=True):
-    """
-    RGB转换 -> resize(resize不改变原图的高宽比) -> normalize
-    并可以选择是否校正bbox
-    :param image_org: 要处理的图像
-    :param target_shape: 对图像处理后，期望得到的图像shape，存储格式为(h, w)
-    :return: 处理之后的图像，shape为target_shape
-    """
-    h_target, w_target = target_shape
-    h_org, w_org, _ = image.shape
-
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB).astype(np.float32)
-
-    resize_ratio = min(1.0 * w_target / w_org, 1.0 * h_target / h_org)
-    resize_w = int(resize_ratio * w_org)
-    resize_h = int(resize_ratio * h_org)
-    image_resized = cv2.resize(image, (resize_w, resize_h))
-
-    image_paded = np.full((h_target, w_target, 3), 128.0)
-    dw = int((w_target - resize_w) / 2)
-    dh = int((h_target - resize_h) / 2)
-    image_paded[dh:resize_h+dh, dw:resize_w+dw,:] = image_resized
-    mean = np.reshape(np.array([0.485, 0.456, 0.406]), [1, 1, 3])
-    std = np.reshape(np.array([0.229, 0.224, 0.225]), [1, 1, 3])
-    image = np.transpose(((image_paded/255.0)-mean)/std, (2, 0, 1))
-    # image = np.transpose(image_paded/255.0, (2, 0, 1))
-
-    if correct_box:
-        bboxes[:, [0, 2]] = bboxes[:, [0, 2]] * resize_ratio + dw
-        bboxes[:, [1, 3]] = bboxes[:, [1, 3]] * resize_ratio + dh
-        return image, bboxes
-    return image
 
 def iou_calc1(boxes1: np.ndarray, boxes2: np.ndarray):
     """
@@ -85,11 +53,6 @@ def giou(boxes1: torch.Tensor, boxes2: torch.Tensor):
     :param boxes2: 且需要保证最后一维为坐标维，以及坐标的存储结构为(xmin, ymin, xmax, ymax)
     :return: 返回boxes1和boxes2的IOU，IOU的shape为boxes1和boxes2广播后的shape[:-1]
     """
-    # boxes1 = torch.cat([torch.min(boxes1[..., :2], boxes1[..., 2:]),
-    #                     torch.max(boxes1[..., :2], boxes1[..., 2:])], -1)
-    # boxes2 = torch.cat([torch.min(boxes2[..., :2], boxes2[..., 2:]),
-    #                     torch.max(boxes2[..., :2], boxes2[..., 2:])], -1)
-
     boxes1_area = (boxes1[..., 2] - boxes1[..., 0]) * (boxes1[..., 3] - boxes1[..., 1])
     boxes2_area = (boxes2[..., 2] - boxes2[..., 0]) * (boxes2[..., 3] - boxes2[..., 1])
 
@@ -102,7 +65,6 @@ def giou(boxes1: torch.Tensor, boxes2: torch.Tensor):
     inter_area = intersection[..., 0] * intersection[..., 1]
     union_area = boxes1_area + boxes2_area - inter_area
     IOU = inter_area / union_area
-    # return IOU
 
     enclose_left_up = torch.min(boxes1[..., :2], boxes2[..., :2])
     enclose_right_down = torch.max(boxes1[..., 2:], boxes2[..., 2:])
@@ -210,6 +172,59 @@ class AverageMeter:
         self.reset()
         return avg
 
+    def get_sum_reset(self):
+        s = self.sum
+        self.sum = 0
+        return s
+
+class TicToc:
+
+    def __init__(self, name: Optional[str]=None):
+        self.name = name
+        self.last = 0
+        self.records = []
+        self.reset()
+
+    def reset(self):
+        self.last = 0
+        self.records.clear()
+
+    def tic(self):
+        self.last = time_ns()
+
+    def toc(self):
+        self.records.append(time_ns() - self.last)
+
+    def __getitem__(self, index):
+        return self.records[index]
+
+    def mean(self):
+        return np.mean(self.records)
+
+    def mean_reset(self):
+        m = self.mean()
+        self.reset()
+        return m
+
+    def sum(self):
+        return np.sum(self.records)
+
+    def sum_reset(self):
+        s = self.sum()
+        self.reset()
+        return s
+    
+    def statistics(self):
+        std = np.std(self.records)
+        return {
+            'name': 'none' if self.name is None else self.name,
+            'mean': np.mean(self.records),
+            'std': std,
+            '3std': 3*std,
+            'min': np.amin(self.records),
+            'max': np.amax(self.records),
+        }
+
 class _Comparable(metaclass=ABCMeta):
     @abstractmethod
     def __lt__(self, other: Any) -> bool: ...
@@ -235,15 +250,15 @@ class PriorityQueue:
 
     def pop(self) -> _val_T:
         return heapq.heappop(self.queue)[-1]
-    
+
     def __len__(self):
         return len(self.queue)
-    
+
     def __next__(self):
         try:
             return self.pop()
         except IndexError:
             raise StopIteration
-    
+
     def __iter__(self):
         return self

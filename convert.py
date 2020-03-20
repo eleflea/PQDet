@@ -42,4 +42,5 @@ def save_weights(weight_path: str, save_path: str, seen: int=0):
     fw.close()
 
 if __name__ == "__main__":
-    save_weights('weights/model-74-0.7724.pt', 'weights/model-74-0.7724_convert.weight')
+    weight_path = '../mweights/pruned-model-19-0.7458.pt'
+    save_weights(weight_path, weight_path.rsplit('.', 1)[0]+'-convert.weights')

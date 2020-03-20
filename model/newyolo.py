@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from torch.quantization import QuantStub, DeQuantStub
 
 from model.parser import Parser
 
@@ -13,11 +14,14 @@ def item_getter(*items):
 
 class YOLOv3(nn.Module):
 
-    def __init__(self, cfg_path: str):
+    def __init__(self, cfg_path: str, quant: bool=False):
         super().__init__()
+        self.quant = quant
+        self.qstub = QuantStub()
+        self.destub = DeQuantStub()
 
         with open(cfg_path, 'r') as fr:
-            self.module_list = nn.ModuleList(Parser(fr).torch_layers())
+            self.module_list = nn.ModuleList(Parser(fr).torch_layers(quant))
 
     def forward(self, x, target=None):
         cache_outputs = []
@@ -27,16 +31,20 @@ class YOLOv3(nn.Module):
             16: item_getter(1, 4),
             32: item_getter(2, 5),
         }
-        for layer in self.module_list:
+        for i, layer in enumerate(self.module_list):
+            if self.quant and i == 0:
+                x = self.qstub(x)
             layer_type = layer._type
-            if layer_type in {'convolutional', 'upsample', 'maxpool'}:
+            if layer_type in ('convolutional', 'upsample', 'maxpool'):
                 x = layer(x)
             elif layer_type == 'shortcut':
-                x += cache_outputs[layer._from]
+                x = layer(x, cache_outputs[layer._from])
             elif layer_type == 'route':
-                x = torch.cat([cache_outputs[li] for li in layer._layers], dim=1)
+                x = layer([cache_outputs[li] for li in layer._layers])
             elif layer_type == 'yolo':
-                x = layer(x, target_map[layer.stride](target))
+                if self.quant:
+                    x = self.destub(x)
+                x = layer(x, target_map[layer._stride](target))
                 outputs.append(x)
             else:
                 raise ValueError('unknown layer type: %s' % layer_type)
@@ -45,7 +53,7 @@ class YOLOv3(nn.Module):
         if target is None:
             outputs = [output.view((output.shape[0], -1, output.shape[-1])) for output in outputs]
             return torch.cat(outputs, dim=1)
-        losses = list(map(lambda *x: sum(x), *outputs))
+        losses = list(map(sum, zip(*outputs)))
         return losses
 
 if __name__ == "__main__":

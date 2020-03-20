@@ -7,6 +7,7 @@ from typing import IO, Generator, List, Tuple, Union
 
 import torch
 from torch import nn
+from torch.nn.quantized import FloatFunctional
 
 from model.loss import loss_per_scale
 
@@ -54,15 +55,17 @@ DEFAULT_LAYERS = {
         'name': 'yolo',
         'classes': 1,
         'ignore_thresh': .5,
+        'bbox_loss': 'giou',
+        'l1_loss_gain': 0.1,
     }
 }
 
 ACTIVATION_MAP = {
-    'logistic': lambda: nn.Sigmoid(),
+    'logistic': nn.Sigmoid,
     'leaky': lambda: nn.LeakyReLU(0.1, inplace=True),
     'relu': lambda: nn.ReLU(inplace=True),
     'relu6': lambda: nn.ReLU6(inplace=True),
-    'tanh': lambda: nn.Tanh(),
+    'tanh': nn.Tanh,
 }
 
 def str2value(ns):
@@ -73,20 +76,48 @@ def str2value(ns):
     except ValueError:
         return ns
 
+class ShortCut(nn.Module):
+    def __init__(self, activation: str, quant: bool=False):
+        super().__init__()
+        self.quant = quant
+        self.ffunc = FloatFunctional()
+        self.act = None
+        if activation != 'linear':
+            self.act = ACTIVATION_MAP[activation]()
+
+    def forward(self, x, other):
+        if self.act is not None:
+            x = self.act(x)
+        if self.quant:
+            return self.ffunc.add(x, other)
+        x += other
+        return x
+
+class Route(nn.Module):
+    def __init__(self, quant: bool=False):
+        super().__init__()
+        self.quant = quant
+        self.ffunc = FloatFunctional()
+
+    def forward(self, xs):
+        if self.quant:
+            return self.ffunc.cat(xs, dim=1)
+        return torch.cat(xs, dim=1)
+
 class Decode(nn.Module):
     def __init__(self, num_classes: int, stride: int):
         super(Decode, self).__init__()
         self.num_classes = num_classes
         self.stride = stride
-        self.respawn_grid(64, 64)
+        self.grid_size = (0, 0)
 
-    def respawn_grid(self, height, width):
+    def respawn_grid(self, height, width, device):
         shiftx = torch.arange(0, height, dtype=torch.float32) + 0.5
         shifty = torch.arange(0, width, dtype=torch.float32) + 0.5
         shifty, shiftx = torch.meshgrid(shiftx, shifty)
         shiftx = shiftx.unsqueeze(-1)
         shifty = shifty.unsqueeze(-1)
-        self.xy_grid = torch.stack([shiftx, shifty], dim=-1)
+        self.xy_grid = torch.stack([shiftx, shifty], dim=-1).to(device)
         self.grid_size = (height, width)
 
     def forward(self, conv):
@@ -103,8 +134,8 @@ class Decode(nn.Module):
             conv, [2, 2, 1, self.num_classes], dim=-1)
 
         if out_size_h > self.grid_size[0] or out_size_w > self.grid_size[1]:
-            self.respawn_grid(round(out_size_h*1.2), round(out_size_w*1.2))
-        xy_grid = self.xy_grid[:out_size_h, :out_size_w, ...]
+            self.respawn_grid(round(out_size_h*1.2), round(out_size_w*1.2), conv.device)
+        xy_grid = self.xy_grid[:out_size_h, :out_size_w, ...].to(conv.device)
 
         # decode xy
         pred_xymin = (xy_grid - torch.exp(conv_raw_dx1dy1)) * self.stride
@@ -119,17 +150,16 @@ class Decode(nn.Module):
 
 class YOLOLayer(nn.Module):
 
-    def __init__(self, num_classes: int, stride: int, ignore_thresh: float):
+    def __init__(self, opt: dict):
         super().__init__()
-        self.decode = Decode(num_classes, stride)
-        self.stride = stride
-        self.ignore_thresh = ignore_thresh
-    
+        self.decode = Decode(opt['classes'], opt['stride'])
+        self.opt = opt
+
     def forward(self, x, target=None):
         x = self.decode(x)
         if target is None:
             return x
-        losses = loss_per_scale(x, *target, self.stride, self.ignore_thresh)
+        losses = loss_per_scale(x, *target, self.opt)
         return losses
 
 UnionLA = Union[Layer, Attr]
@@ -142,7 +172,7 @@ class Parser():
         self.pos = -1
         self.peek = ' '
         self.line = None
-    
+
     def read(self):
         if self.pos == self.size - 1:
             raise EOFError
@@ -158,17 +188,19 @@ class Parser():
             self.read()
         else:
             raise SyntaxError("expect '{}', got '{}'".format(c, self.peek))
-    
+
     def name(self) -> str:
         temp = []
-        while self.peek.isalpha() or self.peek == '_':
+        i = 0
+        while (self.peek.isalpha() or self.peek == '_') or (i != 0 and self.peek.isdigit()):
             temp.append(self.peek)
             try:
                 self.read()
             except EOFError:
                 break
+            i += 1
         return ''.join(temp)
-    
+
     def val(self) -> Union[List, str, int, float]:
         vals = []
         temp = []
@@ -222,7 +254,7 @@ class Parser():
                 raise SyntaxError('line %d: something is missing' % i)
             except SyntaxError as e:
                 raise SyntaxError(('line %d: ' % i) + str(e))
-    
+
     def gen_layers(self) -> Generator[dict, None, None]:
         current_layer = None
         for block in self.gen_blocks():
@@ -233,11 +265,11 @@ class Parser():
             elif isinstance(block, Attr):
                 if current_layer is not None:
                     # pylint: disable-msg=unsupported-assignment-operation
-                    current_layer[block.attr] = block.val 
+                    current_layer[block.attr] = block.val
         if current_layer is not None:
             yield current_layer
-    
-    def torch_layers(self) -> List[nn.Module]:
+
+    def torch_layers(self, quant: bool=False) -> List[nn.Module]:
         input_channels = None
         stride = 1
         layers = []
@@ -264,14 +296,17 @@ class Parser():
                 if not bias:
                     blocks.add_module('bn', nn.BatchNorm2d(l['filters']))
                 if l['activation'] != 'linear':
-                    blocks.add_module('act', ACTIVATION_MAP[l['activation']]())
+                    act = ACTIVATION_MAP[l['activation']]()
+                    if quant:
+                        act = nn.ReLU()
+                    blocks.add_module('act', act)
             elif name == 'shortcut':
-                blocks = nn.Sequential()
-                if l['activation'] != 'linear':
-                    blocks.add_module('act', ACTIVATION_MAP[l['activation']]())
+                blocks = ShortCut(l['activation'], quant)
                 setattr(blocks, '_from', l['from'])
+                setattr(layers[-1], '_notprune', True)
+                setattr(layers[l['from']], '_notprune', True)
             elif name == 'route':
-                blocks = nn.Sequential()
+                blocks = Route(quant)
                 layer_indexes = l['layers']
                 if isinstance(layer_indexes, int):
                     layer_indexes = [layer_indexes]
@@ -288,11 +323,16 @@ class Parser():
                 blocks = nn.UpsamplingNearest2d(scale_factor=l['stride'])
                 stride //= l['stride']
             elif name == 'yolo':
-                blocks = YOLOLayer(l['classes'], stride, l['ignore_thresh'])
-            
+                assert l['bbox_loss'] in {'giou', 'iou', 'l1'}, 'unspport bbox loss type in yolo layer'
+                opt = l.copy()
+                opt['stride'] = stride
+                blocks = YOLOLayer(opt)
+                setattr(layers[-1], '_notprune', True)
+
             setattr(blocks, '_output_channels', input_channels)
             setattr(blocks, '_stride', stride)
             setattr(blocks, '_type', name)
+            setattr(blocks, '_raw', l)
             layers.append(blocks)
         return layers
 

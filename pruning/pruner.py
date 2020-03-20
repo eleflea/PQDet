@@ -1,102 +1,135 @@
+from copy import deepcopy
+
 import torch
 from torch import nn
-import numpy as np
-from eval.evaluate import Evaluator
-from itertools import chain
-from collections import OrderedDict
-from pruning.block import CB, Conv
-import config as cfg
 
-from model.backbone.mobilenetv2 import InvertedResidual
+from dataset.eval_dataset import EvalDataset
+from eval.evaluator import Evaluator
+from pruning import block as PB
+from pruning.block import Conv2d
+from trainer import Trainer
 
 
-def make_model_weights(model_cls, weights_path):
-    model = model_cls().cuda().eval()
-    state_dict = torch.load(weights_path)
-    model.load_state_dict(state_dict['model'])
-    # print('load weights from %s' % weights_path)
-    return model
+CFG_NET_SEGMENT = '''[net]
+# Testing
+#batch=1
+#subdivisions=1
+# Training
+batch=16
+subdivisions=1
+width=416
+height=416
+channels=3
+momentum=0.9
+decay=0.0005
+angle=0
+saturation = 1.5
+exposure = 1.5
+hue=.1
 
-class BasePruner:
-    def __init__(self, model_cls):
-        self.model = make_model_weights(model_cls, cfg.PRUNE_WEIGHTS)
-        self.new_model = make_model_weights(model_cls, cfg.PRUNE_WEIGHTS)
+learning_rate=0.001
+burn_in=1000
+max_batches = 500200
+policy=steps
+steps=400000,450000
+scales=.1,.1'''
+
+class SlimmingPruner:
+    def __init__(self, model_fun, cfg):
+        self.cfg = cfg
+        self._prune_weight = cfg.prune.weight
+        self._prune_ratio = cfg.prune.ratio
+        self._new_cfg = cfg.prune.new_cfg
+        self._num_workers = cfg.system.num_workers
+        self._device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        state_dict = torch.load(self._prune_weight, map_location=self._device)
+        model = model_fun()
+        new_model = model_fun()
+        model.load_state_dict(state_dict['model'])
+        new_model.load_state_dict(state_dict['model'])
+        print('load weights from %s' % self._prune_weight)
+        self.model = model
+        self.new_model = new_model
         self.blocks = []
-        self.prune_ratio = cfg.PRUNE_RATIO
+        self._pruned_weight = self._prune_weight.rsplit('.', 1)[0] + '-pruned.pt'
+
+        self.block_map = {
+            'convolutional': PB.Conv2d,
+            'maxpool': PB.Pool,
+            'upsample': PB.Upsample,
+            'yolo': PB.YOLO,
+            'shortcut': PB.ShortCut,
+            'route': PB.Route
+        }
 
     def prune(self):
-        blocks = OrderedDict()
-        previous_module = None
-        previous_name = ''
-        last_block = None
-
-        # set InvertedResidual residual connect
-        for mod in self.new_model.modules():
-            if not isinstance(mod, InvertedResidual):
-                continue
-            if mod.use_res_connect:
-                mod.conv[2].keep_output = True
-
-        for _, (name, module) in enumerate(chain(self.new_model.named_modules(), [['pad', None]])):
-            if not isinstance(previous_module, nn.Conv2d):
-                previous_module = module
-                previous_name = name
-                continue
-            idx = len(blocks)
-            if isinstance(module, nn.BatchNorm2d):
-                block = CB(
-                    previous_name,
-                    idx,
-                    [last_block],
-                    [previous_module, module],
-                    [*list(previous_module.state_dict().values()), *list(module.state_dict().values())],
-                    keep_output=hasattr(previous_module, 'keep_output'),
-                )
+        for i, layer in enumerate(self.new_model.module.module_list):
+            if layer._type in {'convolutional', 'maxpool', 'upsample', 'yolo'}:
+                input_layers = [] if len(self.blocks) == 0 else [self.blocks[-1]]
+            elif layer._type == 'shortcut':
+                self.blocks[layer._from].keep_out = True
+                self.blocks[-1].keep_out = True
+                input_layers = [self.blocks[layer._from], self.blocks[-1]]
+            elif layer._type == 'route':
+                input_layers = [self.blocks[li] for li in layer._layers]
             else:
-                block = Conv(
-                    previous_name,
-                    idx,
-                    [last_block],
-                    [previous_module],
-                    list(previous_module.state_dict().values()),
-                )
-            blocks[previous_name] = block
-            last_block = block
-            previous_module = module
-            previous_name = name
-        blocks['mergelarge.conv7.convbn.conv'].input_layer = [blocks['headslarge.conv4.convbn.conv']]
-        blocks['headsmid.conv8.convbn.conv'].input_layer.append(blocks['backbone.features.13.conv.2'])
-        blocks['mergemid.conv15.convbn.conv'].input_layer = [blocks['headsmid.conv12.convbn.conv']]
-        blocks['headsmall.conv16.convbn.conv'].input_layer.append(blocks['backbone.features.6.conv.2'])
-        self.blocks = blocks
+                raise ValueError("unknown layer type '%s'" % layer._type)
+            self.blocks.append(self.block_map[layer._type](i, input_layers, layer))
+
+        # gather BN weights
+        bns = []
+        maxbn = []
+        for b in self.blocks:
+            if isinstance(b, Conv2d) and b.bn_scale is not None:
+                bns.extend(b.bn_scale.tolist())
+                maxbn.append(b.bn_scale.max().item())
+
+        bns = torch.Tensor(bns)
+        sorted_bns = torch.sort(bns)[0]
+        prune_limit = (sorted_bns == min(maxbn)).nonzero().item() / len(bns)
+        print('prune limit: {}'.format(prune_limit))
+        if self._prune_ratio > prune_limit:
+            raise AssertionError('prune ratio bigger than limit')
+
+        thre_index = int(bns.shape[0] * self._prune_ratio)
+        thre = sorted_bns[thre_index]
+        thre = thre.to(self._device)
+        pruned_bn = 0
+        segments = [CFG_NET_SEGMENT]
+        for b in self.blocks:
+            pruned_num = b.prune(thre)
+            pruned_bn += pruned_num
+            print("({}){}: {}/{} pruned".format(
+                b.layer_id, b.layer_name, pruned_num, len(b.out_mask)
+            ))
+            segments.append(b.reflect())
+        cfg_content = '\n\n'.join(segments)
+        with open(self._new_cfg, 'w') as fw:
+            fw.write(cfg_content)
+
+        status = {
+            'step': 0,
+            'model': self.new_model.state_dict(),
+        }
+        torch.save(status, self._pruned_weight)
+        print("Slimming Pruner done")
+
     def test(self):
-        evaluator = Evaluator(self.new_model)
-        self.new_model.eval()
-        APs = evaluator.mAP()
-        for cls in APs:
-            AP_mess = 'AP for %s = %.4f\n' % (cls, APs[cls])
-            print(AP_mess.strip())
-        mAP = np.mean([APs[cls] for cls in APs])
-        mAP_mess = 'mAP = %.4f\n' % mAP
-        print(mAP_mess.strip())
-    def finetune(self, epoch=10):
-        dataset = YOLODataset()
+        eval_dataset = EvalDataset(self.cfg)
         dataloader = torch.utils.data.DataLoader(
-            dataset, batch_size=1, shuffle=True, num_workers=2, pin_memory=True,
+            eval_dataset, batch_size=None, shuffle=False,
+            num_workers=self._num_workers, pin_memory=True,
+            collate_fn=lambda x: x,
         )
-        cfg.STEPS_PER_EPOCH = len(dataloader)
-        self.trainer.model=self.newmodel
-        # self.best_mAP=self.trainer._valid_epoch(validiter=10)[0][0]
-        self.best_mAP=0
-        for epoch in range(0, self.trainer.args.OPTIM.total_epoch):
-            self.trainer.global_epoch += 1
-            self.trainer._train_epoch()
-            self.trainer.lr_scheduler.step(epoch)
-            lr_current = self.trainer.optimizer.param_groups[0]['lr']
-            print("epoch:{} lr:{}".format(epoch,lr_current))
-            results, imgs = self.trainer._valid_epoch()
-            self.trainer._reset_loggers()
-            if results[0] > self.best_mAP:
-                self.best_mAP = results[0]
-                self.trainer._save_ckpt(name='best-ft{}'.format(self.pruneratio), metric=self.best_mAP)
-        return self.best_mAP
+        evaluator = Evaluator(self.new_model, dataloader, self.cfg)
+        self.new_model.eval()
+        AP = evaluator.evaluate()
+        APs = AP.classes
+        # 打印每类结果
+        for klass in APs:
+            print('AP@%s = %.4f' % (klass, APs[klass]))
+        print('mAP = %.4f' % AP.mean)
+
+    def finetune(self):
+        trainer = Trainer(self.cfg)
+        trainer.run_prune(self._pruned_weight)
