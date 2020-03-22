@@ -1,7 +1,7 @@
-experiment_name: VOC_std_iou
+experiment_name: VOC_std_ioufls
 
 system:
-  gpus: [0]
+  gpus: [0, 1]
   num_workers: 6
 
 dataset:
@@ -14,7 +14,7 @@ model:
 train:
   # scheduler: 'step'
   max_epochs: 60
-  batch_size: 16
+  batch_size: 32
   # input_sizes: [480, 512, 544, 576]
   learning_rate_init: 2e-4
 
@@ -27,7 +27,7 @@ augment:
 
 eval:
   after: 40
-  batch_size: 40
+  batch_size: 80
 
 prune:
   weight: weights/VOC_prune/model-0.pt

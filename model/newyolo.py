@@ -1,8 +1,9 @@
 import torch
 from torch import nn
-from torch.quantization import QuantStub, DeQuantStub
+from torch.quantization import DeQuantStub, QuantStub
 
 from model.parser import Parser
+from typing import IO, Union
 
 
 def item_getter(*items):
@@ -14,14 +15,16 @@ def item_getter(*items):
 
 class YOLOv3(nn.Module):
 
-    def __init__(self, cfg_path: str, quant: bool=False):
+    def __init__(self, cfg: Union[str, IO], quant: bool=False):
         super().__init__()
         self.quant = quant
         self.qstub = QuantStub()
         self.destub = DeQuantStub()
 
-        with open(cfg_path, 'r') as fr:
-            self.module_list = nn.ModuleList(Parser(fr).torch_layers(quant))
+        if isinstance(cfg, str):
+            cfg = open(cfg, 'r')
+        self.module_list = nn.ModuleList(Parser(cfg).torch_layers(quant))
+        cfg.close()
 
     def forward(self, x, target=None):
         cache_outputs = []

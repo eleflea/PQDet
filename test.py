@@ -1,5 +1,5 @@
 import argparse
-from typing import Callable, List, Dict, Any
+from typing import Any, Callable, Dict, List
 
 import torch
 from tqdm import tqdm
@@ -13,14 +13,10 @@ from eval.evaluator import Evaluator, convert_pred
 from model.newyolo import YOLOv3
 
 
-def trained_model(cfg_path: str, weight_path: str, device):
-    model = torch.nn.DataParallel(YOLOv3(cfg_path)).to(device)
-    state_dict = torch.load(weight_path, map_location=device)
-    model.load_state_dict(state_dict['model'])
-    return model
-
 def evaluate(config, args):
-    model = trained_model(cfg.model.cfg_path, args.weight, args.device)
+    model = tools.build_model(
+        cfg.model.cfg_path, args.weight, None, device=args.device, dataparallel=True
+    )[0]
     eval_dataset = EvalDataset(config)
     evaluator = Evaluator(model, eval_dataset, config)
     model.eval()
@@ -54,16 +50,21 @@ def benchmark(config, args):
     with open(config.dataset.eval_txt_file, 'r') as fr:
         files = [line.strip() for line in fr.readlines() if len(line.strip()) != 0][:100]
 
-    model = trained_model(cfg.model.cfg_path, args.weight, args.device).module
+    model = tools.build_model(
+        cfg.model.cfg_path, args.weight, None, device=args.device, dataparallel=False,
+        qat=args.qat, quantized=args.quant,
+    )[0]
     size = size_fix(args.size)
     process = augment.Compose([
         augment.Resize(size),
         augment.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        augment.ToTensor('cpu'),
+        augment.ToTensor(args.device),
     ])
+    print('loading images')
     images = prepare_images(files, process)
 
     # warm up
+    print('warmimg up')
     for _ in range(5):
         with torch.no_grad():
             model(torch.rand(1, 3, *size).to(args.device))
@@ -110,6 +111,8 @@ if __name__ == "__main__":
     parser.add_argument('--threshold', help='test score threshold', type=float, default=0.1)
     parser.add_argument('--bs', help='batch size', type=int, default=16)
     parser.add_argument('--device', help='device', type=str, default='cuda')
+    parser.add_argument('--qat', help='QAT model', action='store_true', default=False)
+    parser.add_argument('--quant', help='quantized model', action='store_true', default=False)
     args = parser.parse_args()
     cfg.model.cfg_path = args.cfg
     cfg.eval.input_size = args.size

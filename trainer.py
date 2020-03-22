@@ -1,44 +1,19 @@
 import argparse
 import math
 import os
-import numpy as np
 from itertools import chain
-from copy import deepcopy
 
+import numpy as np
 import torch
 import torch.optim as optim
-from torch import nn
 
-from config import cfg, get_device, fix_gpus
+import tools
+from config import cfg, fix_gpus, get_device
 from dataset.eval_dataset import EvalDataset
 from dataset.train_dataset import TrainDataset, collate_batch
 from eval.evaluator import Evaluator
-from model.newyolo import YOLOv3
 from tools import AverageMeter, TicToc
 
-
-def get_bn_modules(model: nn.DataParallel):
-    '''遍历整个模型，得到所有需要稀疏化的BN module，暂时是全部。
-
-    Args:
-        model: 网络模型。
-
-    Returns:
-        list: 所有需要稀疏化的BN module的列表。
-    '''
-    all_bns = []
-    c = 0
-    for l in model.module.module_list:
-        if l._type == 'convolutional' and hasattr(l, 'bn'):
-            if not hasattr(l, '_notprune'):
-                all_bns.append(l.bn)
-            c += 1
-    print("sparse mode: {}/{} BN layers will be sparsed.".format(len(all_bns), c))
-    return all_bns
-
-def ensure_weights_dir(path: str):
-    # 建立存放模型权重的文件夹（如果不存在的话）
-    os.makedirs(path, exist_ok=True)
 
 class Trainer:
 
@@ -70,6 +45,7 @@ class Trainer:
         self._sparse_ratio = config.sparse.ratio
         # quant
         self._quant_train = config.quant.switch
+        self._quant_backend = config.quant.backend
         self._disable_observer_after = config.quant.disable_observer_after
         self._freeze_bn_after = config.quant.freeze_bn_after
         # system
@@ -138,21 +114,9 @@ class Trainer:
             param_group['lr'] = lr
         return lr
 
-    def fuse_model(self):
-        for layer in self.model.module.module_list:
-            if layer._type == 'convolutional':
-                names = [name for name, _ in layer.named_children() if name in {'conv', 'bn', 'act'}]
-                if 'bn' not in names:
-                    continue
-                torch.quantization.fuse_modules(layer, names, inplace=True)
-
-    def init_quant(self):
-        print('quantization aware training')
-        self.fuse_model()
-        self.model = self.model.module
-        self.model.qconfig = torch.quantization.get_default_qat_qconfig('fbgemm')
-        torch.quantization.prepare_qat(self.model, inplace=True)
-        self.model.to(self._device)
+    def init_cfg(self):
+        with open(self._cfg_path, 'r') as fr:
+            self.cfg = fr.read()
 
     # 建立数据集
     def init_dataset(self):
@@ -174,34 +138,14 @@ class Trainer:
 
     # 建立YOLOv3模型
     def init_model(self):
-        model = YOLOv3(self._cfg_path, self._quant_train).to(self._device)
-        model = nn.DataParallel(model, device_ids=self._gpus)
-        self.model = model
-
-    def init_weights(self):
-        # 如果backbone权重存在，载入做迁移学习
-        if len(self._backbone_weight) > 0:
-            print('loading backbone weights from {}'.format(self._backbone_weight))
-            state_dict = torch.load(self._backbone_weight, map_location=self._device)
-            ori_state_dict = self.model.module.state_dict()
-            ori_state_dict.update(state_dict)
-            self.model.module.load_state_dict(ori_state_dict)
-
-        # 如果是恢复训练进度
-        if len(self._resume_weight) > 0:
-            # 读入待恢复的权重和训练步数
-            state_dict = torch.load(self._resume_weight, map_location=self._device)
-            # 如果指定清除训练历史,则训练步数置为0,否则恢复
-            if self._clear_history:
-                global_step = 0
-            else:
-                global_step = state_dict['step']
-            self.global_step = global_step
-            # 恢复权重
-            self.model.load_state_dict(state_dict['model'])
-            # 计算恢复的轮数
-            self.init_eopch = global_step // self._steps_per_epoch
-            print('resume at %d steps from %s' % (global_step, self._resume_weight))
+        if self._quant_train:
+            print('quantization aware training')
+        self.model, model_info = tools.build_model(self._cfg_path, self._resume_weight, self._backbone_weight,
+            device=self._device, clear_history=self._clear_history, dataparallel=True,
+            device_ids=self._gpus, qat=self._quant_train, backend=self._quant_backend)
+        self.global_step = model_info.get('step', 0)
+        # 计算恢复的轮数
+        self.init_eopch = self.global_step // self._steps_per_epoch
 
     # 准备评估模型的类
     def init_evaluator(self):
@@ -236,23 +180,21 @@ class Trainer:
         self.mAP = None
         self.APs = None
 
-    def save(self, epoch, jit=False):
+    def save(self, epoch):
         # 如果评估了mAP，则保存轮数和mAP值，否则只保存轮数到文件名
         base_name = self._weight_base_name
-        if jit:
-            base_name = 'jit-' + base_name
         model_name = f'{base_name}-{epoch}.pt' if self.mAP is None\
             else f'{base_name}-{epoch}-{self.mAP:.4f}.pt'
         model_path = os.path.join(self._weights_dir, model_name)
-        if jit:
-            model = torch.quantization.convert(self.model.to('cpu').eval(), inplace=False)
-            torch.jit.save(torch.jit.script(model.eval()), model_path)
         # 保存模型参数
         status = {
             'step': self.global_step,
             'APs': self.APs,
             'mAP': self.mAP,
             'model': self.model.state_dict(),
+            'cfg': self.cfg,
+            'type': 'qat' if self._quant_train else 'normal',
+            'backend': self._quant_backend if self._quant_train else 'none',
         }
         torch.save(status, model_path)
 
@@ -349,14 +291,7 @@ class Trainer:
             # 轮数超过了指定轮数
             if epoch >= self._eval_after:
                 if self._quant_train:
-                    quant_model = deepcopy(self.model)
-                    self.evaluator.model = torch.quantization.convert(
-                        quant_model.eval().cpu(), inplace=False
-                    )
-                    self.evaluator.model.eval()
-                    self.eval()
-                    self.save(epoch)
-                    continue
+                    self.evaluator.model = tools.quantized_model(self.model)
                 # 设置模型为评估模式
                 self.model.eval()
                 self.eval()
@@ -365,21 +300,19 @@ class Trainer:
             self.save(epoch)
 
     def run(self):
-        ensure_weights_dir(self._weights_dir)
+        tools.ensure_dir(self._weights_dir)
+        self.init_cfg()
         self.init_dataset()
         # 一轮训练的步数
         self._steps_per_epoch = len(self.train_dataloader)
         # 每一轮训练打印多少次损失
         self._loss_print_interval = self._steps_per_epoch // 10
         self.init_model()
-        self.init_weights()
         self.init_evaluator()
         self.init_optimizer()
-        if self._quant_train:
-            self.init_quant()
         self.init_losses()
         if self._sparse_train:
-            self.bns = get_bn_modules(self.model)
+            self.bns = tools.get_bn_layers(self.model)
         self.train()
 
     def run_prune(self, prune_weight: str):

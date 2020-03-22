@@ -1,7 +1,7 @@
-experiment_name: VOC_quant2
+experiment_name: VOC_quant3
 
 system:
-  gpus: [0, 1]
+  gpus: [0]
   num_workers: 6
 
 dataset:
@@ -14,7 +14,7 @@ model:
 train:
   batch_size: 6
   learning_rate_init: 2e-4
-  max_epochs: 60
+  max_epochs: 80
 
 # weight:
 #   resume: weights/VOC_prune/model-6-0.5812.pt
@@ -24,11 +24,11 @@ augment:
   color_p: 0
 
 eval:
-  after: 40
+  after: 50
   batch_size: 12
   partial: 0
 
 quant:
   switch: on
-  disable_observer_after: 4
-  freeze_bn_after: 6
+  disable_observer_after: 10
+  freeze_bn_after: 8

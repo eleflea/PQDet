@@ -128,7 +128,9 @@ _C.prune.ratio: float = 0.3
 
 _C.quant = CN()
 # 是否进行QAT
-_C.quant.switch = False
+_C.quant.switch: bool = False
+# QAT后端 'fbgemm' or 'qnnpack'
+_C.quant.backend: str = 'fbgemm'
 # QAT时在多少轮之后关闭observer
 _C.quant.disable_observer_after: int = 4
 # QAT时在多少轮以后冻结BN层参数

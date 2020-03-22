@@ -8,6 +8,7 @@ from eval.evaluator import Evaluator
 from pruning import block as PB
 from pruning.block import Conv2d
 from trainer import Trainer
+from config import get_device
 
 
 CFG_NET_SEGMENT = '''[net]
@@ -41,7 +42,7 @@ class SlimmingPruner:
         self._prune_ratio = cfg.prune.ratio
         self._new_cfg = cfg.prune.new_cfg
         self._num_workers = cfg.system.num_workers
-        self._device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self._device = get_device(cfg.system.gpus)
         state_dict = torch.load(self._prune_weight, map_location=self._device)
         model = model_fun()
         new_model = model_fun()

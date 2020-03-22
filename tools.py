@@ -1,10 +1,150 @@
-import torch
-from time import time_ns
-import numpy as np
-from abc import ABCMeta, abstractmethod
-from typing import Any, TypeVar, Callable, Optional
 import heapq
+import os
+from abc import ABCMeta, abstractmethod
+from copy import deepcopy
+from io import StringIO
+from time import time_ns
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 
+import numpy as np
+import torch
+from torch import nn
+
+from model.newyolo import YOLOv3
+
+
+def _state_dict_is_dp(state_dict: Dict) -> bool:
+    for k in state_dict:
+        return k.startswith('module.')
+
+def _model_is_dp(model: nn.Module) -> bool:
+    return isinstance(model, nn.DataParallel)
+
+def load_weight(model: nn.Module, state_dict: Dict):
+    dp_model = _model_is_dp(model)
+    dp_state_dict = _state_dict_is_dp(state_dict)
+    if dp_model == dp_state_dict:
+        model.load_state_dict(state_dict)
+        return
+    if dp_model:
+        model.module.load_state_dict(state_dict)
+    else:
+        nn.DataParallel(model).load_state_dict(state_dict)
+
+def load_backbone(model: nn.Module, state_dict: Dict):
+    dp_model = _model_is_dp(model)
+    dp_state_dict = _state_dict_is_dp(state_dict)
+    if dp_model == dp_state_dict:
+        ori_state_dict = model.state_dict()
+        ori_state_dict.update(state_dict)
+        model.load_state_dict(ori_state_dict)
+        return
+    if dp_model:
+        load_backbone(model.module, state_dict)
+    else:
+        load_backbone(nn.DataParallel(model), state_dict)
+
+def build_model(cfg_path: Optional[str], weight_path: Optional[str], backbone_path: Optional[str],
+    clear_history: bool=False, device='cuda', dataparallel: bool=True, device_ids=None,
+    qat: bool=False, backend: Optional[str]=None, quantized: bool=False) -> (nn.Module, Dict):
+
+    model_info = {}
+
+    if weight_path:
+        state_dict = torch.load(weight_path, map_location=device)
+        state_dict_type = state_dict.get('type', 'normal')
+        weight = state_dict['model']
+        model_info = {k: v for k, v in state_dict.items() if k != 'model'}
+        if clear_history:
+            model_info['step'] = 0
+    else:
+        state_dict_type = None
+    if cfg_path:
+        cfg = cfg_path
+    else:
+        cfg = StringIO(state_dict['cfg'])
+
+    model = YOLOv3(cfg, qat or quantized)
+    if dataparallel:
+        model = torch.nn.DataParallel(model, device_ids)
+
+    if backbone_path:
+        print('loading backbone weights from {}'.format(backbone_path))
+        backbone_state_dict = torch.load(backbone_path, map_location=device)
+        load_backbone(model, backbone_state_dict)
+
+    if state_dict_type == 'normal':
+        load_weight(model, weight)
+        print('resumed at %d steps from %s' % (model_info['step'], weight_path))
+
+    if state_dict_type in {'qat', 'quant'} or qat or quantized:
+        fuse_model(model, inplace=True)
+        if backend is None:
+            backend = model_info.get('backend')
+            if backend not in {'fbgemm', 'qnnpack'}:
+                backend = 'fbgemm'
+        prepare_qat(model, backend=backend, inplace=True)
+    if state_dict_type == 'qat':
+        load_weight(model, weight)
+        print('resumed at %d steps from %s' % (model_info['step'], weight_path))
+
+    if state_dict_type == 'quant' or quantized:
+        quantized_model(model, inplace=True)
+    if state_dict_type == 'quant':
+        load_weight(model, weight)
+
+    return model.to(device), model_info
+
+def _condition_copy_model(model: nn.Module, inplace: bool=True) -> nn.Module:
+    if inplace:
+        return model
+    new_model = deepcopy(model)
+    return new_model
+
+def _bare_model(model: nn.Module):
+    if _model_is_dp(model):
+        return model.module
+    return model
+
+def fuse_model(model: nn.Module, inplace: bool=True) -> nn.Module:
+    new_model = _condition_copy_model(model, inplace)
+    bare_model = _bare_model(new_model)
+    for layer in bare_model.module_list:
+        if layer._type == 'convolutional':
+            names = [name for name, _ in layer.named_children() if name in {'conv', 'bn', 'act'}]
+            if 'bn' not in names:
+                continue
+            torch.quantization.fuse_modules(layer, names, inplace=True)
+    return new_model
+
+def prepare_qat(model: nn.Module, backend: str='fbgemm', inplace: bool=True) -> nn.Module:
+    new_model = _condition_copy_model(model, inplace)
+    new_model.qconfig = torch.quantization.get_default_qat_qconfig(backend)
+    return torch.quantization.prepare_qat(new_model, inplace=inplace)
+
+def quantized_model(model: nn.Module, inplace: bool=False) -> nn.Module:
+    new_model = _condition_copy_model(model, inplace)
+    quant_model = torch.quantization.convert(new_model.eval().cpu(), inplace=inplace)
+    return quant_model.eval()
+
+def get_bn_layers(model: nn.Module) -> List[nn.BatchNorm2d]:
+    '''遍历整个模型，根据layer的`_notprune` attr得到所有需要稀疏化的BN module。
+
+    Args:
+        model: 网络模型。
+
+    Returns:
+        list: 所有需要稀疏化的BN layers的列表。
+    '''
+    bn_layers = []
+    c = 0
+    for l in _bare_model(model).module_list:
+        if l._type == 'convolutional' and hasattr(l, 'bn'):
+            if not hasattr(l, '_notprune'):
+                bn_layers.append(l.bn)
+            c += 1
+    print("sparse mode: {}/{} BN layers will be sparsed.".format(len(bn_layers), c))
+    return bn_layers
 
 def iou_calc1(boxes1: np.ndarray, boxes2: np.ndarray):
     """
@@ -213,7 +353,7 @@ class TicToc:
         s = self.sum()
         self.reset()
         return s
-    
+
     def statistics(self):
         std = np.std(self.records)
         return {
@@ -262,3 +402,7 @@ class PriorityQueue:
 
     def __iter__(self):
         return self
+
+def ensure_dir(path: str):
+    # 建立存放模型权重的文件夹（如果不存在的话）
+    os.makedirs(path, exist_ok=True)
