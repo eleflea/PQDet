@@ -141,7 +141,7 @@ class Trainer:
         if self._quant_train:
             print('quantization aware training')
         self.model, model_info = tools.build_model(self._cfg_path, self._resume_weight, self._backbone_weight,
-            device=self._device, clear_history=self._clear_history, dataparallel=True,
+            device=self._device, clear_history=self._clear_history, dataparallel=False if self._quant_train else True,
             device_ids=self._gpus, qat=self._quant_train, backend=self._quant_backend)
         self.global_step = model_info.get('step', 0)
         # 计算恢复的轮数
@@ -275,11 +275,6 @@ class Trainer:
             self.model.train()
             self._clear_ap()
 
-            self.epoch_tt.tic()
-            self.train_epoch(epoch)
-            self.epoch_tt.toc()
-            print('{:.3f}s per epoch'.format(self.epoch_tt.sum_reset()/1e9))
-
             if self._quant_train:
                 if epoch >= self._disable_observer_after:
                     # Freeze quantizer parameters
@@ -287,6 +282,11 @@ class Trainer:
                 if epoch >= self._freeze_bn_after:
                     # Freeze batch norm mean and variance estimates
                     self.model.apply(torch.nn.intrinsic.qat.freeze_bn_stats)
+
+            self.epoch_tt.tic()
+            self.train_epoch(epoch)
+            self.epoch_tt.toc()
+            print('{:.3f}s per epoch'.format(self.epoch_tt.sum_reset()/1e9))
 
             # 轮数超过了指定轮数
             if epoch >= self._eval_after:
