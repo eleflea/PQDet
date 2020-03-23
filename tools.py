@@ -14,13 +14,37 @@ from model.newyolo import YOLOv3
 
 
 def _state_dict_is_dp(state_dict: Dict) -> bool:
+    '''通过检查`state_dict`的第一个key是否以`module.`
+    开头来判断`state_dict`是否有DataParallel。
+
+    Args:
+        state_dict: 网络模型的state_dict。
+
+    Returns:
+        bool: 如果有DataParallel，返回True，否则False。
+    '''
     for k in state_dict:
         return k.startswith('module.')
 
 def _model_is_dp(model: nn.Module) -> bool:
+    '''判断`model`是否有DataParallel。
+
+    Args:
+        model: 网络模型。
+
+    Returns:
+        bool: 如果有DataParallel，返回True，否则False。
+    '''
     return isinstance(model, nn.DataParallel)
 
 def load_weight(model: nn.Module, state_dict: Dict):
+    '''向`model`加载`state_dict`。
+    两者key, value对必须一致，不过可以存在DataParallel的不同。
+
+    Args:
+        model: 网络模型。
+        state_dict: 网络模型的state_dict。
+    '''
     dp_model = _model_is_dp(model)
     dp_state_dict = _state_dict_is_dp(state_dict)
     if dp_model == dp_state_dict:
@@ -32,6 +56,13 @@ def load_weight(model: nn.Module, state_dict: Dict):
         nn.DataParallel(model).load_state_dict(state_dict)
 
 def load_backbone(model: nn.Module, state_dict: Dict):
+    '''向`model`加载`state_dict`。
+    `state_dict`必须是`model`的前缀，不过可以存在DataParallel的不同。
+
+    Args:
+        model: 网络模型。
+        state_dict: backbone的state_dict。
+    '''
     dp_model = _model_is_dp(model)
     dp_state_dict = _state_dict_is_dp(state_dict)
     if dp_model == dp_state_dict:
@@ -44,24 +75,57 @@ def load_backbone(model: nn.Module, state_dict: Dict):
     else:
         load_backbone(nn.DataParallel(model), state_dict)
 
-def build_model(cfg_path: Optional[str], weight_path: Optional[str], backbone_path: Optional[str],
+def build_model(cfg_path: Optional[str], weight_path: Optional[str]=None, backbone_path: Optional[str]=None,
     clear_history: bool=False, device='cuda', dataparallel: bool=True, device_ids=None,
     qat: bool=False, backend: Optional[str]=None, quantized: bool=False) -> (nn.Module, Dict):
+    '''根据输入参数构建模型。
 
+    本函数可以构建普通模型、QAT模型和量化模型。
+
+    模型构建顺序为：普通模型---fuse&prepare_qat-->QAT模型---convert-->量化模型
+
+    当weight_path权重是QAT权重时，即使`qat=False`，返回的模型至少是QAT模型（或是它的后继——量化模型）。
+    同理，当quantized为真时，返回模型必是量化模型。
+
+    如何判断权重的类别？通过state_dict中的'type'参数，此参数可取'normal', 'qat', 'quant'。
+    默认为'normal'。
+
+    Args:
+        cfg_path: 网络模型的cfg文件路径。为''或为None时则从weight_path的state_dict中获取。
+        weight_path: 网络模型的权重路径。为''或为None时不加载权重。此权重会覆盖backbone权重。
+        backbone_path: 网络模型backbone权重路径。为''或为None时不加载权重。此权重被weight_path的权重覆盖。
+        clear_history: 如果为真，将weight_path state_dict中的'step'置为0。在返回值Dict中体现。
+        device: 模型所在设备。
+        dataparallel: 返回的模型是否带有DataParallel。
+        device_ids: DataParallel所使用的设备ID。
+        qat: 为真时返回QAT模型。
+        backend: 量化操作使用的后端。目前只有'fbgemm'和'qnnpack'。为None时，
+            尝试从weight_path state_dict中的'backend'参数获取，获取失败默认采用'fbgemm'。
+        quantized: 为真时返回量化模型。
+
+    Returns:
+        nn.Module: 构建完成的网络模型。
+        Dict: weight_path state_dict中除网络权重之外的其他信息。若weight_path不存在，则返回空Dict。
+    '''
+
+    # state_dict中除权重的其他信息，默认为空
     model_info = {}
 
     if weight_path:
         state_dict = torch.load(weight_path, map_location=device)
         state_dict_type = state_dict.get('type', 'normal')
         weight = state_dict['model']
+        # 把其他信息找出来
         model_info = {k: v for k, v in state_dict.items() if k != 'model'}
         if clear_history:
+            # 清除step
             model_info['step'] = 0
     else:
         state_dict_type = None
     if cfg_path:
         cfg = cfg_path
     else:
+        # 如果cfg_path没有的话，从state_dict中的'cfg'参数加载cfg
         cfg = StringIO(state_dict['cfg'])
 
     model = YOLOv3(cfg, qat or quantized)
@@ -77,6 +141,7 @@ def build_model(cfg_path: Optional[str], weight_path: Optional[str], backbone_pa
         load_weight(model, weight)
         print('resumed at %d steps from %s' % (model_info['step'], weight_path))
 
+    # 权重是QAT或量化的，或者要返回QAT或量化模型，都需要做fuse和prepare_qat
     if state_dict_type in {'qat', 'quant'} or qat or quantized:
         fuse_model(model, inplace=True)
         if backend is None:
@@ -86,7 +151,7 @@ def build_model(cfg_path: Optional[str], weight_path: Optional[str], backbone_pa
         prepare_qat(model, backend=backend, inplace=True)
     if state_dict_type == 'qat':
         load_weight(model, weight)
-        print('resumed at %d steps from %s' % (model_info['step'], weight_path))
+        print('resumed qat at %d steps from %s' % (model_info['step'], weight_path))
 
     if state_dict_type == 'quant' or quantized:
         quantized_model(model, inplace=True)
@@ -107,28 +172,57 @@ def _bare_model(model: nn.Module):
     return model
 
 def fuse_model(model: nn.Module, inplace: bool=True) -> nn.Module:
+    '''融合`model`中的Conv, BN, ReLU。
+
+    Args:
+        model: 网络模型。
+        inplace: 是否原地融合。
+    
+    Returns:
+        nn.Module: 融合后的网络模型。
+    '''
     new_model = _condition_copy_model(model, inplace)
     bare_model = _bare_model(new_model)
     for layer in bare_model.module_list:
         if layer._type == 'convolutional':
             names = [name for name, _ in layer.named_children() if name in {'conv', 'bn', 'act'}]
-            if 'bn' not in names:
+            if len(names) < 2:
                 continue
             torch.quantization.fuse_modules(layer, names, inplace=True)
     return new_model
 
 def prepare_qat(model: nn.Module, backend: str='fbgemm', inplace: bool=True) -> nn.Module:
+    '''准备QAT模型。
+
+    Args:
+        model: 网络模型。必须是已经经过融合的。
+        backend: 量化操作后端，'fbgemm', 'qnnpack'之一。
+        inplace: 是否原地。
+    
+    Returns:
+        nn.Module: QAT模型。
+    '''
     new_model = _condition_copy_model(model, inplace)
     new_model.qconfig = torch.quantization.get_default_qat_qconfig(backend)
     return torch.quantization.prepare_qat(new_model, inplace=inplace)
 
 def quantized_model(model: nn.Module, inplace: bool=False) -> nn.Module:
+    '''将QAT模型转化为量化模型。
+
+    Args:
+        model: 网络模型。必须是QAT模型。
+        inplace: 是否原地转换。
+    
+    Returns:
+        nn.Module: 量化模型。
+    '''
     new_model = _condition_copy_model(model, inplace)
+    # 目前量化模型pytorch只支持CPU
     quant_model = torch.quantization.convert(new_model.eval().cpu(), inplace=inplace)
     return quant_model.eval()
 
 def get_bn_layers(model: nn.Module) -> List[nn.BatchNorm2d]:
-    '''遍历整个模型，根据layer的`_notprune` attr得到所有需要稀疏化的BN module。
+    '''遍历整个模型，根据layer的`_notprune` attr得到所有需要稀疏化的BN layers。
 
     Args:
         model: 网络模型。
@@ -160,7 +254,8 @@ def iou_calc1(boxes1: np.ndarray, boxes2: np.ndarray):
     right_down = np.minimum(boxes1[..., 2:], boxes2[..., 2:])
 
     # 计算出boxes1和boxes2相交部分的宽、高
-    # 因为两个boxes没有交集时，(right_down - left_up) < 0，所以maximum可以保证当两个boxes没有交集时，它们之间的iou为0
+    # 因为两个boxes没有交集时，(right_down - left_up) < 0，
+    # 所以maximum可以保证当两个boxes没有交集时，它们之间的iou为0
     inter_section = np.maximum(right_down - left_up, 0.0)
     inter_area = inter_section[..., 0] * inter_section[..., 1]
     union_area = boxes1_area + boxes2_area - inter_area
@@ -180,7 +275,8 @@ def iou_calc3(boxes1: torch.Tensor, boxes2: torch.Tensor):
     left_up = torch.max(boxes1[..., :2], boxes2[..., :2])
     right_down = torch.min(boxes1[..., 2:], boxes2[..., 2:])
 
-    # 因为两个boxes没有交集时，(right_down - left_up) < 0，所以maximum可以保证当两个boxes没有交集时，它们之间的iou为0
+    # 因为两个boxes没有交集时，(right_down - left_up) < 0，
+    # 所以maximum可以保证当两个boxes没有交集时，它们之间的iou为0
     inter_section = torch.max(right_down - left_up, torch.zeros_like(right_down))
     inter_area = inter_section[..., 0] * inter_section[..., 1]
     union_area = boxes1_area + boxes2_area - inter_area
@@ -200,7 +296,8 @@ def giou(boxes1: torch.Tensor, boxes2: torch.Tensor):
     intersection_left_up = torch.max(boxes1[..., :2], boxes2[..., :2])
     intersection_right_down = torch.min(boxes1[..., 2:], boxes2[..., 2:])
 
-    # 因为两个boxes没有交集时，(right_down - left_up) < 0，所以maximum可以保证当两个boxes没有交集时，它们之间的iou为0
+    # 因为两个boxes没有交集时，(right_down - left_up) < 0，
+    # 所以maximum可以保证当两个boxes没有交集时，它们之间的iou为0
     intersection = torch.max(intersection_right_down - intersection_left_up, torch.zeros_like(intersection_right_down))
     inter_area = intersection[..., 0] * intersection[..., 1]
     union_area = boxes1_area + boxes2_area - inter_area
@@ -295,7 +392,8 @@ class AverageMeter:
     """Computes and stores the average and current value"""
 
     def __init__(self):
-        self.reset()
+        self.sum = 0
+        self.count = 0
 
     def reset(self):
         self.sum = 0
@@ -404,5 +502,5 @@ class PriorityQueue:
         return self
 
 def ensure_dir(path: str):
-    # 建立存放模型权重的文件夹（如果不存在的话）
+    # 建立文件夹（如果不存在的话）
     os.makedirs(path, exist_ok=True)
