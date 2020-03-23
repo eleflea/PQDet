@@ -1,5 +1,6 @@
 import math
 from collections import namedtuple
+from itertools import chain
 from typing import Callable, List, Sequence, Tuple, Union, Any
 
 import cv2
@@ -14,59 +15,6 @@ _range_T = Union[List[float], Tuple[float, float]]
 _transform_T = Callable[[Any, np.ndarray], Tuple[np.ndarray, np.ndarray]]
 _sampler_T = Callable[[], Tuple[np.ndarray, np.ndarray]]
 _bboxes_T = Union[List, np.ndarray]
-
-def rgb_to_hsv(img: torch.Tensor) -> torch.Tensor:
-    r, g, b = img.unbind(dim=0)
-
-    maxc = img.max(0)[0]
-    minc = img.min(0)[0]
-
-    deltac = maxc - minc
-    s = deltac / maxc
-    s[torch.isnan(s)] = 0.
-
-    # avoid division by zero
-    deltac = torch.where(
-        deltac == 0, torch.ones_like(deltac), deltac)
-
-    rc = (maxc - r) / deltac
-    gc = (maxc - g) / deltac
-    bc = (maxc - b) / deltac
-
-    maxg = g == maxc
-    maxr = r == maxc
-
-    h = (4.0 + gc - rc)
-    h[maxg] = 2.0 + rc[maxg] - bc[maxg]
-    h[maxr] = bc[maxr] - gc[maxr]
-    h[minc == maxc] = 0.0
-
-    h = (h / 6.0) % 1.0
-
-    h = 2 * math.pi * h
-    return torch.stack([h, s, maxc], dim=0)
-
-def hsv_to_rgb(img: torch.Tensor) -> torch.Tensor:
-    h, s, v = img.unbind(dim=0)
-    h.div_(2 * math.pi)
-
-    hi = torch.floor(h * 6) % 6
-    f = ((h * 6) % 6) - hi
-    # pylint: disable-msg=not-callable
-    one = torch.tensor(1.).to(img.device)
-    p = v * (one - s)
-    q = v * (one - f * s)
-    t = v * (one - (one - f) * s)
-
-    out = torch.stack([hi, hi, hi], dim=0)
-
-    out[out == 0] = torch.stack((v, t, p), dim=0)[out == 0]
-    out[out == 1] = torch.stack((q, v, p), dim=0)[out == 1]
-    out[out == 2] = torch.stack((p, v, t), dim=0)[out == 2]
-    out[out == 3] = torch.stack((p, q, v), dim=0)[out == 3]
-    out[out == 4] = torch.stack((t, p, v), dim=0)[out == 4]
-    out[out == 5] = torch.stack((v, p, q), dim=0)[out == 5]
-    return out
 
 class RandomCrop:
 
@@ -198,9 +146,11 @@ class DeNormalize:
         np.clip((img * self.std + self.mean)*255., 0, 255, out=img)
         return img.astype(np.uint8), bboxes
 
+_aware_size_T = Union[_size_T, Callable[[], _size_T]]
+
 class Resize:
 
-    def __init__(self, size: Union[_size_T, Callable[[], _size_T]], pad_val: int=128):
+    def __init__(self, size: _aware_size_T, pad_val: int=128):
         self.pad_val = pad_val
         self.size = size
 
@@ -257,6 +207,65 @@ class Mixup:
         bboxes = np.concatenate(bboxes_no_empty)
         return img, bboxes
 
+class Mosaic:
+
+    def __init__(self, sampler: _sampler_T, size: _aware_size_T, pad_val: int=128, p: float=1):
+        self.sampler = sampler
+        self.size = size
+        self.pad_val = pad_val
+        self.p = p
+
+    def __call__(self, img: np.ndarray, bboxes: _bboxes_T):
+        if callable(self.size):
+            input_h, input_w = self.size()
+        else:
+            input_h, input_w = self.size
+        xc = int(random.uniform(input_w * 0.5, input_w * 1.5))
+        yc = int(random.uniform(input_h * 0.5, input_h * 1.5))
+
+        bboxes4 = []
+        img4 = np.zeros((input_h * 2, input_w * 2, 3), dtype=np.uint8) + self.pad_val
+        other_imgs, other_bboxes = list(zip(*[self.sampler() for _ in range(3)]))
+        all_bboxes_copy = np.concatenate([bboxes] + list(other_bboxes), axis=0)
+        all_imgs_bboxes = zip(chain([img], other_imgs), chain([bboxes], other_bboxes))
+        for i, (image, bboxes) in enumerate(all_imgs_bboxes):
+            h, w = image.shape[:2]
+
+            # place img in img4
+            if i == 0:  # top left
+                x1a, y1a, x2a, y2a = max(xc - w, 0), max(yc - h, 0), xc, yc  # xmin, ymin, xmax, ymax (large image)
+                x1b, y1b, x2b, y2b = w - (x2a - x1a), h - (y2a - y1a), w, h  # xmin, ymin, xmax, ymax (small image)
+            elif i == 1:  # top right
+                x1a, y1a, x2a, y2a = xc, max(yc - h, 0), min(xc + w, input_w * 2), yc
+                x1b, y1b, x2b, y2b = 0, h - (y2a - y1a), min(w, x2a - x1a), h
+            elif i == 2:  # bottom left
+                x1a, y1a, x2a, y2a = max(xc - w, 0), yc, xc, min(input_h * 2, yc + h)
+                x1b, y1b, x2b, y2b = w - (x2a - x1a), 0, max(xc, w), min(y2a - y1a, h)
+            elif i == 3:  # bottom right
+                x1a, y1a, x2a, y2a = xc, yc, min(xc + w, input_w * 2), min(input_h * 2, yc + h)
+                x1b, y1b, x2b, y2b = 0, 0, min(w, x2a - x1a), min(y2a - y1a, h)
+
+            img4[y1a:y2a, x1a:x2a] = image[y1b:y2b, x1b:x2b]  # img4[ymin:ymax, xmin:xmax]
+            bboxes[:, [0, 2]] += x1a - x1b
+            bboxes[:, [1, 3]] += y1a - y1b
+            bboxes4.append(bboxes)
+
+        bboxes4 = np.concatenate(bboxes4, axis=0)
+        bboxes4[:, [0, 2]] = np.clip(bboxes4[:, [0, 2]] - input_w / 2, 0, input_w)
+        bboxes4[:, [1, 3]] = np.clip(bboxes4[:, [1, 3]] - input_h / 2, 0, input_h)
+
+        img4 = img4[input_h // 2: input_h // 2 + input_h, input_w // 2: input_w // 2 + input_w]
+
+        w = bboxes4[:, 2] - bboxes4[:, 0]
+        h = bboxes4[:, 3] - bboxes4[:, 1]
+        area = w * h
+        area0 = (all_bboxes_copy[:, 2] - all_bboxes_copy[:, 0]) * (all_bboxes_copy[:, 3] - all_bboxes_copy[:, 1])
+        ar = np.maximum(w / (h + 1e-16), h / (w + 1e-16))  # aspect ratio
+        i = (w > 8) & (h > 8) & (area / (area0 + 1e-16) > 0.25) & (ar < 10)
+        bboxes4 = bboxes4[i]
+
+        return img4, bboxes4
+
 class ToTensor:
 
     def __init__(self, device: torch.device):
@@ -265,6 +274,12 @@ class ToTensor:
     def __call__(self, img: np.ndarray, bboxes: _bboxes_T):
         img = np.transpose(img, (2, 0, 1)).astype(np.float32)
         img = torch.from_numpy(img).to(self.device)
+        return img, bboxes
+
+class HWCtoCHW:
+
+    def __call__(self, img: np.ndarray, bboxes: _bboxes_T):
+        img = np.transpose(img, (2, 0, 1)).astype(np.float32)
         return img, bboxes
 
 class Empty:
