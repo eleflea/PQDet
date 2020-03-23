@@ -2,7 +2,11 @@ import argparse
 from typing import Any, Callable, Dict, List
 
 import torch
+import onnx
+import onnxruntime
+from torchsummaryX import summary
 from tqdm import tqdm
+import numpy as np
 
 import tools
 from config import cfg, size_fix
@@ -10,8 +14,18 @@ from dataset import augment
 from dataset.eval_dataset import EvalDataset
 from dataset.sample import SampleGetter
 from eval.evaluator import Evaluator, convert_pred
-from model.newyolo import YOLOv3
 
+
+def onnx_model(onnx_path: str):
+
+    def model(x: np.ndarray):
+        ort_input = {ort_session.get_inputs()[0].name: x}
+        return ort_session.run(None, ort_input)[0]
+
+    onnx_model = onnx.load(onnx_path)
+    onnx.checker.check_model(onnx_model)
+    ort_session = onnxruntime.InferenceSession(onnx_path)
+    return model
 
 def evaluate(config, args):
     model = tools.build_model(
@@ -44,6 +58,52 @@ def _print_statistics(statistic: Dict[str, Any]):
     print('\tAverage: {:.2f}±{:.3f} ms'.format(stat['mean'], stat['3std']))
     print('\tRange: {:.2f} ms ~ {:.2f} ms'.format(stat['min'], stat['max']))
 
+def benchmark_onnx(config, args):
+    torch.backends.cudnn.benchmark = True
+
+    with open(config.dataset.eval_txt_file, 'r') as fr:
+        files = [line.strip() for line in fr.readlines() if len(line.strip()) != 0][:100]
+
+    model = onnx_model(args.onnx)
+    size = size_fix(args.size)
+    process = augment.Compose([
+        augment.Resize(size),
+        augment.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        augment.HWCtoCHW(),
+    ])
+    print('loading images')
+    images = prepare_images(files, process)
+
+    total_timer = tools.TicToc('TOTAL')
+    forward_timer = tools.TicToc('FORWARD')
+    convert_timer = tools.TicToc('CONVERT')
+    nms_timer = tools.TicToc('NMS')
+
+    input_shape = torch.FloatTensor(size).to(args.device)
+    threshold = args.threshold
+    nms_iou = args.nms_iou
+    for image, shape in tqdm(images):
+        image = image[None, ...]
+        shape = shape[None, ...]
+        total_timer.tic()
+        forward_timer.tic()
+        pred = model(image)
+        forward_timer.toc()
+        convert_timer.tic()
+        bboxes = convert_pred(torch.from_numpy(pred).to(args.device), input_shape, shape)[0]
+        convert_timer.toc()
+        nms_timer.tic()
+        tools.torch_nms(bboxes, threshold, nms_iou)
+        nms_timer.toc()
+        total_timer.toc()
+
+    print('BENCHMARK: {} images in {} size'.format(len(images), size))
+    timers = [total_timer, forward_timer, convert_timer, nms_timer]
+    stats = [t.statistics() for t in timers]
+    for s in stats:
+        s['percent'] = s['mean'] / stats[0]['mean']
+        _print_statistics(s)
+
 def benchmark(config, args):
     torch.backends.cudnn.benchmark = True
 
@@ -52,7 +112,7 @@ def benchmark(config, args):
 
     model = tools.build_model(
         cfg.model.cfg_path, args.weight, None, device=args.device, dataparallel=False,
-        qat=args.qat, quantized=args.quant,
+        qat=args.qat, quantized=args.quant, backend=args.backend,
     )[0]
     size = size_fix(args.size)
     process = augment.Compose([
@@ -100,11 +160,16 @@ def benchmark(config, args):
         s['percent'] = s['mean'] / stats[0]['mean']
         _print_statistics(s)
 
+def model_summary(config, args):
+    model = tools.build_model(args.cfg, device='cpu', dataparallel=False)[0]
+    summary(model, torch.zeros((1, 3, args.size, args.size)))
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="test configuration")
-    parser.add_argument('mode', help='test mode', type=str, choices=('eval', 'benchmark'))
-    parser.add_argument('--weight', help='model weight')
-    parser.add_argument('--cfg', help='model cfg file')
+    parser.add_argument('mode', help='test mode', type=str, choices=('eval', 'benchmark', 'summary'))
+    parser.add_argument('--cfg', help='model cfg file', required=False)
+    parser.add_argument('--weight', help='model weight', required=False)
+    parser.add_argument('--onnx', help='onnx file', required=False)
     parser.add_argument('--size', help='test image size', type=int, default=512)
     parser.add_argument('--iou', help='test AP iou', type=int, default=0.5)
     parser.add_argument('--nms-iou', help='NMS iou', type=int, default=0.45)
@@ -113,6 +178,7 @@ if __name__ == "__main__":
     parser.add_argument('--device', help='device', type=str, default='cuda')
     parser.add_argument('--qat', help='QAT model', action='store_true', default=False)
     parser.add_argument('--quant', help='quantized model', action='store_true', default=False)
+    parser.add_argument('--backend', help='quantized backend', type=str, default='fbgemm')
     args = parser.parse_args()
     cfg.model.cfg_path = args.cfg
     cfg.eval.input_size = args.size
@@ -125,4 +191,5 @@ if __name__ == "__main__":
     {
         'eval': evaluate,
         'benchmark': benchmark,
+        'summary': model_summary,
     }[args.mode](cfg, args)
