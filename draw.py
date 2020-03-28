@@ -3,6 +3,7 @@ from torch import nn
 from model.newyolo import YOLOv3
 import matplotlib.pyplot as plt
 import numpy as np
+import json
 
 plt.rcParams['font.sans-serif']=['SimHei']
 
@@ -73,14 +74,25 @@ def get_channel_nums(state_dict):
     channels = np.array(channels, dtype=np.int)
     return channels
 
+def draw_evol(file_path: str):
+    records = json.load(open(file_path, 'r'))['data']
+    fig, ax = plt.subplots(3, 4, figsize=(8, 6))
+    names = records[0]['hyper'].keys()
+    for record in records:
+        hypers = record['hyper']
+        fitness = record['fitness']
+        for i, name in enumerate(names):
+            ax[i//4, i%4].title.set_text(name)
+            ax[i//4, i%4].scatter(hypers[name], fitness, c='b', s=10)
 
 if __name__ == "__main__":
-    weights = ['weights/model-74-0.7724.pt', 
-    'weights/model-79-0.7421.pt',
-    'weights/pruned-model-26-0.7569.pt'
-    ]
-    labels = ['正常训练', '稀疏训练', '稀疏训练微调后']
-    draw_multi_bn_scatter(weights, labels)
+    # weights = ['weights/model-74-0.7724.pt', 
+    # 'weights/model-79-0.7421.pt',
+    # 'weights/pruned-model-26-0.7569.pt'
+    # ]
+    # labels = ['正常训练', '稀疏训练', '稀疏训练微调后']
+    # draw_multi_bn_scatter(weights, labels)
+    draw_evol('evol.json')
 
     # weights = ['weights/model-74-0.7724.pt', 
     # 'weights/pruned-model-26-0.7569.pt'
