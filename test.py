@@ -16,15 +16,16 @@ from dataset.sample import SampleGetter
 from eval.evaluator import Evaluator, convert_pred
 
 
-def onnx_model(onnx_path: str):
+def onnx_model(onnx_path: str, cuda: bool=True):
 
     def model(x: np.ndarray):
         ort_input = {ort_session.get_inputs()[0].name: x}
         return ort_session.run(None, ort_input)[0]
 
-    onnx_model = onnx.load(onnx_path)
-    onnx.checker.check_model(onnx_model)
-    ort_session = onnxruntime.InferenceSession(onnx_path)
+    load_model = onnx.load(onnx_path)
+    onnx.checker.check_model(load_model)
+    providers = [] if cuda else ['CPUExecutionProvider']
+    ort_session = onnxruntime.InferenceSession(onnx_path, providers=providers)
     return model
 
 def evaluate(config, args):
@@ -64,8 +65,14 @@ def benchmark_onnx(config, args):
     with open(config.dataset.eval_txt_file, 'r') as fr:
         files = [line.strip() for line in fr.readlines() if len(line.strip()) != 0][:100]
 
-    model = onnx_model(args.onnx)
+    model = onnx_model(args.onnx, args.device == 'cuda')
     size = size_fix(args.size)
+
+    # warm up
+    print('warmimg up')
+    for _ in range(50):
+        model(np.random.randn(1, 3, *size).astype(np.float32))
+
     process = augment.Compose([
         augment.Resize(size),
         augment.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
@@ -84,7 +91,7 @@ def benchmark_onnx(config, args):
     nms_iou = args.nms_iou
     for image, shape in tqdm(images):
         image = image[None, ...]
-        shape = shape[None, ...]
+        shape = shape[None, ...].to(args.device)
         total_timer.tic()
         forward_timer.tic()
         pred = model(image)
@@ -178,7 +185,7 @@ if __name__ == "__main__":
     parser.add_argument('--device', help='device', type=str, default='cuda')
     parser.add_argument('--qat', help='QAT model', action='store_true', default=False)
     parser.add_argument('--quant', help='quantized model', action='store_true', default=False)
-    parser.add_argument('--backend', help='quantized backend', type=str, default='fbgemm')
+    parser.add_argument('--backend', help='quantized backend', type=str, default='qnnpack')
     args = parser.parse_args()
     cfg.model.cfg_path = args.cfg
     cfg.eval.input_size = args.size
@@ -190,6 +197,6 @@ if __name__ == "__main__":
     cfg.freeze()
     {
         'eval': evaluate,
-        'benchmark': benchmark,
+        'benchmark': benchmark_onnx if args.onnx else benchmark,
         'summary': model_summary,
     }[args.mode](cfg, args)
