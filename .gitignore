@@ -17,3 +17,6 @@ weights/pretrained/*
 
 # log
 log/*
+
+# export model
+export/*
