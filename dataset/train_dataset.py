@@ -5,6 +5,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+import tools
 from config import sizes_fix
 from dataset import augment
 from dataset.sample import SampleGetter
@@ -52,6 +53,7 @@ class TrainDataset(Dataset):
         self._classes = config.dataset.classes
         self._num_classes = len(self._classes)
         self._gt_per_grid = config.model.gt_per_grid
+        self._anchors = np.array(config.model.anchors, dtype=np.float32)
 
         self._color_p = config.augment.color_p
         self._mixup_p = config.augment.mixup_p
@@ -70,6 +72,12 @@ class TrainDataset(Dataset):
             augment.Mixup(self.sample_sample, p=self._mixup_p, beta=1.5),
             augment.ToTensor('cpu'),
         ])
+        self.mosaic = augment.Compose([
+            augment.Mosaic(self.sample_sample, p=1, size=self._get_input_size),
+            augment.Mixup(self.sample_sample, p=0, beta=1.5),
+            augment.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            augment.ToTensor('cpu'),
+        ])
         self.augment = augment.Compose([
             augment.RandomHFlip(p=self._hflip_p),
             augment.RandomCrop(p=self._crop_p),
@@ -85,7 +93,7 @@ class TrainDataset(Dataset):
 
     def __len__(self):
         return self._length
-    
+
     @property
     def length(self):
         return self._num_imgs
@@ -115,8 +123,9 @@ class TrainDataset(Dataset):
         output_sizes = self.input_size // self._strides[:, None]
 
         image, bboxes = self.get_sample(self._shuffle_indexes[index])
+        # image, bboxes = self.mosaic(image, bboxes)
         image, bboxes = self.mixup(image, bboxes)
-        labels = self.create_label(bboxes, output_sizes)
+        labels = self.create_label3(bboxes, output_sizes)
         return (image, *labels)
 
     def create_label(self, bboxes, output_sizes):
@@ -222,6 +231,49 @@ class TrainDataset(Dataset):
                 label[scale_branch][yind, xind, ratio_branch, :] = bbox_label
                 bboxes_count[scale_branch][yind, xind, ratio_branch] = 1
                 bboxes_coor[scale_branch].append(bbox_coor)
+        label_sbbox, label_mbbox, label_lbbox = label
+        sbboxes, mbboxes, lbboxes = bboxes_coor
+        return label_sbbox, label_mbbox, label_lbbox, sbboxes, mbboxes, lbboxes
+
+    def create_label3(self, bboxes, output_sizes):
+        label = [_npzeros(output_sizes[i][0], output_sizes[i][1],
+            self._gt_per_grid, 6 + self._num_classes) for i in range(3)]
+        # mixup weight位默认为1.0
+        for i in range(3):
+            label[i][..., -1] = 1.0
+        bboxes_coor = [[] for _ in range(3)]
+
+        for bbox in bboxes:
+            # (1)获取bbox在原图上的顶点坐标、类别索引、mix up权重、中心坐标、高宽、尺度
+            bbox_coor = bbox[:4]
+            bbox_class_ind = int(bbox[4])
+            bbox_mixw = bbox[5]
+            bbox_xywh = np.concatenate([(bbox_coor[2:] + bbox_coor[:2]) * 0.5,
+                                        bbox_coor[2:] - bbox_coor[:2]], axis=-1)
+
+            # label smooth
+            onehot = np.zeros(self._num_classes, dtype=np.float)
+            onehot[bbox_class_ind] = 1.0
+            uniform_distribution = np.full(self._num_classes, 1.0 / self._num_classes)
+            deta = 0.01
+            smooth_onehot = onehot * (1 - deta) + deta * uniform_distribution
+
+            xy_indexes = (bbox_xywh[:2][:, None]//self._strides).astype(np.int32).T
+            xcyc = (xy_indexes.astype(np.float32)+0.5) * self._strides[:, None]
+            anchor_bboxes = np.concatenate([np.repeat(xcyc, 3, axis=0), self._anchors], axis=-1)
+            ious = tools.iou_xywh_numpy(bbox_xywh, anchor_bboxes)
+            iou_mask = ious > 0.3
+            if not iou_mask.any():
+                # print('dataset: all anchors missed!, highest {:.2f}'.format(ious.max()))
+                iou_mask[ious.argmax()] = 1
+
+            for i in iou_mask.nonzero()[0]:
+                scale_branch, ratio_branch = i // 3, i % 3
+                x, y = xy_indexes[scale_branch]
+                bbox_label = np.concatenate([bbox_coor, [1.0], smooth_onehot, [bbox_mixw]], axis=-1)
+                label[scale_branch][y, x, ratio_branch, :] = bbox_label
+                bboxes_coor[scale_branch].append(bbox_coor)
+
         label_sbbox, label_mbbox, label_lbbox = label
         sbboxes, mbboxes, lbboxes = bboxes_coor
         return label_sbbox, label_mbbox, label_lbbox, sbboxes, mbboxes, lbboxes

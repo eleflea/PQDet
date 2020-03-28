@@ -311,6 +311,34 @@ def giou(boxes1: torch.Tensor, boxes2: torch.Tensor):
 
     return GIOU
 
+def iou_xywh_numpy(boxes1: np.ndarray, boxes2: np.ndarray):
+    """
+    :param boxes1: boxes1和boxes2的shape可以不相同，但是需要满足广播机制
+    :param boxes2: 且需要保证最后一维为坐标维，以及坐标的存储结构为(x,y,w,h)，其中(x,y)是bbox的中心坐标
+    :return: 返回boxes1和boxes2的IOU，IOU的shape为boxes1和boxes2广播后的shape[:-1]
+    """
+    boxes1_area = boxes1[..., 2] * boxes1[..., 3]
+    boxes2_area = boxes2[..., 2] * boxes2[..., 3]
+
+    # 分别计算出boxes1和boxes2的左上角坐标、右下角坐标
+    # 存储结构为(xmin, ymin, xmax, ymax)，其中(xmin,ymin)是bbox的左上角坐标，(xmax,ymax)是bbox的右下角坐标
+    boxes1 = np.concatenate([boxes1[..., :2] - boxes1[..., 2:] * 0.5,
+                             boxes1[..., :2] + boxes1[..., 2:] * 0.5], axis=-1)
+    boxes2 = np.concatenate([boxes2[..., :2] - boxes2[..., 2:] * 0.5,
+                             boxes2[..., :2] + boxes2[..., 2:] * 0.5], axis=-1)
+
+    # 计算出boxes1与boxes1相交部分的左上角坐标、右下角坐标
+    left_up = np.maximum(boxes1[..., :2], boxes2[..., :2])
+    right_down = np.minimum(boxes1[..., 2:], boxes2[..., 2:])
+
+    # 因为两个boxes没有交集时，(right_down - left_up) < 0，
+    # 所以maximum可以保证当两个boxes没有交集时，它们之间的iou为0
+    inter_section = np.maximum(right_down - left_up, 0.0)
+    inter_area = inter_section[..., 0] * inter_section[..., 1]
+    union_area = boxes1_area + boxes2_area - inter_area
+    IOU = inter_area / union_area
+    return IOU
+
 def nms(bboxes, score_threshold, iou_threshold, sigma=0.3, method='nms'):
     """
     :param bboxes:

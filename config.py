@@ -53,11 +53,13 @@ _C.model = CN()
 _C.model.cfg_path: str = 'model/cfg/mobilenetv2-yolo.cfg'
 _C.model.strides: Sequence[int] = [8, 16, 32]
 _C.model.gt_per_grid: int = 3
+_C.model.anchors: Sequence[Tuple[int, int]] = [(10, 13), (16, 30), (33, 23),
+    (30, 61), (62, 45), (59, 119), (116, 90), (156, 198), (373, 326)]
 
 _C.train = CN()
 # 训练时输入图像大小，List[int]或List[Tuple[int, int]]
 # 前者长宽相等，后者两个数代表(height, width)
-sizes_T = Union[Sequence[int], Sequence[Tuple[int, int]]]
+sizes_T = Sequence[Union[int, Tuple[int, int]]]
 _C.train.input_sizes: sizes_T = [320, 352, 384, 416, 448, 480, 512, 544, 576, 608]
 # 训练batch size
 _C.train.batch_size: int = 12
@@ -80,7 +82,7 @@ _C.augment = CN()
 # 数据增强中mix up方法应用的概率
 _C.augment.mixup_p: float = 0.5
 # 数据增强中color jitter方法应用的概率
-_C.augment.color_p: float = 1
+_C.augment.color_p: float = 1.
 # 数据增强中horizon flip方法应用的概率
 _C.augment.hflip_p: float = 0.5
 # 数据增强中random crop方法应用的概率
@@ -130,7 +132,7 @@ _C.quant = CN()
 # 是否进行QAT
 _C.quant.switch: bool = False
 # QAT后端 'fbgemm' or 'qnnpack'
-_C.quant.backend: str = 'fbgemm'
+_C.quant.backend: str = 'qnnpack'
 # QAT时在多少轮之后关闭observer
 _C.quant.disable_observer_after: int = 4
 # QAT时在多少轮以后冻结BN层参数
