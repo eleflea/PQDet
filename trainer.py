@@ -248,7 +248,7 @@ class Trainer:
                 losses = [l.get_avg_reset() for l in self.losses.values()]
                 # 依次打印：学习率(lr);当前轮数/最大轮数(epoch);步数(step);训练总平均损失(train_loss)
                 # 位置平均损失(xy);置信度平均损失(conf);类别平均损失(cls)
-                print('lr: %.6f\tepoch: %d/%d\tstep: %d\ttrain_loss: %.4f(xy: %.4f, conf: %.4f, cls: %.4f)' %
+                print('lr: %.6f\tepoch: %d/%d\tstep: %d\ttrain_loss: %.3f(xy: %.3f, conf: %.3f, cls: %.3f)' %
                     (lr, epoch, self._max_epochs, self.global_step, *losses))
 
             self.dataload_tt.tic()
