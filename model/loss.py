@@ -22,8 +22,23 @@ def focal(target, actual, alpha=0.5, gamma=2):
 def loss_per_scale(pred, label, bboxes, opt):
     # type: (torch.Tensor, torch.Tensor, torch.Tensor, dict) -> Tuple[torch.Tensor]
     stride = opt['stride']
-    ignore_thresh = opt['ignore_thresh']
     bbox_loss_type = opt['bbox_loss']
+    ignore_thresh = opt['ignore_thresh']
+    # bbox_loss_gain = opt['bbox_loss_gain']
+    # conf_loss_gain = opt['conf_loss_gain']
+    # cls_loss_gain = opt['cls_loss_gain']
+    # conf_loss_alpha = opt['conf_loss_alpha']
+    # cls_loss_alpha = opt['cls_loss_alpha']
+    # conf_loss_beta = opt['conf_loss_beta']
+    # cls_loss_beta = opt['cls_loss_beta']
+    # ignore_thresh = 0.6
+    bbox_loss_gain = 1
+    conf_loss_gain = 1
+    cls_loss_gain = 2
+    conf_loss_alpha = 0.75
+    cls_loss_alpha = 0.5
+    conf_loss_beta = 2
+    cls_loss_beta = 2
 
     bce_loss = nn.BCELoss(reduction='none')
     out_size_h, out_size_w = pred.shape[1:3]
@@ -56,6 +71,7 @@ def loss_per_scale(pred, label, bboxes, opt):
         bbox_loss = respond_bbox * bbox_loss_scale * (1.0 - iou)
     else:
         raise NotImplementedError
+    bbox_loss *= bbox_loss_gain
 
     # confidence loss
     iou = tools.iou_calc3(pred_coor[:, :, :, :, None, :],
@@ -65,17 +81,17 @@ def loss_per_scale(pred, label, bboxes, opt):
     respond_bgd = (1.0 - respond_bbox) * \
         (max_iou < ignore_thresh).float()
 
-    conf_focal = focal(respond_bbox, pred_conf, alpha=0.5)
+    conf_focal = focal(respond_bbox, pred_conf, alpha=conf_loss_alpha, gamma=conf_loss_beta)
 
-    conf_loss = conf_focal * (
+    conf_loss = conf_loss_gain * conf_focal * (
         respond_bbox * bce_loss(pred_conf, respond_bbox)
         +
         respond_bgd * bce_loss(pred_conf, respond_bbox)
     )
 
     # classes loss
-    # class_focal = 2 * focal(label_prob, pred_prob, alpha=0.5)
-    prob_loss = respond_bbox * bce_loss(pred_prob, label_prob)
+    class_focal =  focal(label_prob, pred_prob, alpha=cls_loss_alpha, gamma=cls_loss_beta)
+    prob_loss = cls_loss_gain * class_focal * respond_bbox * bce_loss(pred_prob, label_prob)
 
     # sum up
     bbox_loss = (bbox_loss * label_mixw).sum([1, 2, 3, 4]).mean()
