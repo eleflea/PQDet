@@ -57,7 +57,7 @@ def export_quant_to_onnx(cfg_path: str, weight_path: str):
         operator_export_type=torch.onnx.OperatorExportTypes.ONNX_ATEN_FALLBACK
     )
 
-def export_normal_to_onnx(cfg_path: str, weight_path: str):
+def export_normal_to_onnx(cfg_path: str, weight_path: str, onnx_path: str):
     model = tools.build_model(
         cfg_path, weight_path, device='cpu', dataparallel=False
     )[0]
@@ -66,13 +66,25 @@ def export_normal_to_onnx(cfg_path: str, weight_path: str):
     torch_in = torch.randn(1, 3, 512, 512)
     dynamic_axes = {'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}}
     torch.onnx.export(
-        model, torch_in, 'export/myolo.onnx', verbose=False, input_names=['input'],
+        model, torch_in, onnx_path, verbose=False, input_names=['input'],
         output_names=['output'], dynamic_axes=dynamic_axes, opset_version=11,
     )
 
+def partial(weight_path: str, save_path: str, layers: int):
+    state_dict = torch.load(weight_path, map_location=torch.device('cpu'))['model']
+    partial_dict = {}
+    sentinel = f'{layers+1}.'
+    for key, params in state_dict.items():
+        if sentinel in key:
+            break
+        partial_dict[key] = params
+    torch.save(partial_dict, save_path)
+
 if __name__ == "__main__":
-    weight_path = 'weights/VOC_quant3/model-44.pt'
+    weight_path = 'weights/trained/pruned-model-19-0.7458.pt'
+    # partial(weight_path, 'weights/pretrained/mobilev2-prune40.pt', 61)
+    # weight_path = 'weights/VOC_quant3/model-44.pt'
     # weight_path = 'weights/trained/model-74-0.7724.pt'
     # save_weight_to_darknet(weight_path, weight_path.rsplit('.', 1)[0]+'-convert.weights')
-    export_quant_to_onnx('model/cfg/mobilenetv2-yolo.cfg', weight_path)
-    # export_normal_to_onnx('model/cfg/mobilenetv2-yolo.cfg', weight_path)
+    # export_quant_to_onnx('model/cfg/mobilenetv2-yolo.cfg', weight_path)
+    export_normal_to_onnx('model/cfg/myolo-prune-40.cfg', weight_path, 'export/myolo-prune40.onnx')
