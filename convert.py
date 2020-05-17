@@ -1,6 +1,10 @@
 import numpy as np
+import onnx
 import torch
+
 import tools
+from export.onnx_exporter import ONNXExporter
+
 
 def save_weight_to_darknet(weight_path: str, save_path: str, seen: int=0):
     fw = open(save_path, 'wb')
@@ -42,20 +46,14 @@ def save_weight_to_darknet(weight_path: str, save_path: str, seen: int=0):
 
     fw.close()
 
-def export_quant_to_onnx(cfg_path: str, weight_path: str):
+def export_quantized_to_onnx(cfg_path: str, weight_path: str, onnx_path: str):
     model = tools.build_model(
         cfg_path, weight_path, device='cpu', dataparallel=False, quantized=True, backend='qnnpack'
     )[0]
     model.eval()
-    # print(model)
-
-    torch_in = torch.randn(1, 3, 512, 512)
-    dynamic_axes = {'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}}
-    torch.onnx.export(
-        model, torch_in, 'export/quant_myolo.onnx', verbose=True, input_names=['input'],
-        output_names=['output'], dynamic_axes=dynamic_axes, opset_version=9,
-        operator_export_type=torch.onnx.OperatorExportTypes.ONNX_ATEN_FALLBACK
-    )
+    onnx_exporter = ONNXExporter(model, size=(512, 512))
+    onnx_model = onnx_exporter.export(graph_name='quantized-mobilenetv2-yolov3-lite')
+    onnx.save(onnx_model, onnx_path)
 
 def export_normal_to_onnx(cfg_path: str, weight_path: str, onnx_path: str):
     model = tools.build_model(
@@ -81,10 +79,10 @@ def partial(weight_path: str, save_path: str, layers: int):
     torch.save(partial_dict, save_path)
 
 if __name__ == "__main__":
-    weight_path = 'weights/trained/pruned-model-19-0.7458.pt'
+    weight_path = 'weights/VOC_std_prune40_quant/model-77-0.7674.pt'
     # partial(weight_path, 'weights/pretrained/mobilev2-prune40.pt', 61)
     # weight_path = 'weights/VOC_quant3/model-44.pt'
     # weight_path = 'weights/trained/model-74-0.7724.pt'
     # save_weight_to_darknet(weight_path, weight_path.rsplit('.', 1)[0]+'-convert.weights')
-    # export_quant_to_onnx('model/cfg/mobilenetv2-yolo.cfg', weight_path)
-    export_normal_to_onnx('model/cfg/myolo-prune-40.cfg', weight_path, 'export/myolo-prune40.onnx')
+    export_quantized_to_onnx('model/cfg/myolo-prune-40.cfg', weight_path, 'export/quant_myolov1.onnx')
+    # export_normal_to_onnx('model/cfg/myolo-prune-40.cfg', weight_path, 'export/myolo-prune40.onnx')
