@@ -19,4 +19,4 @@ weights/pretrained/*
 log/*
 
 # export model
-export/*
+export/*.onnx
