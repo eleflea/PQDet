@@ -10,7 +10,8 @@ import numpy as np
 import torch
 from torch import nn
 
-from model.newyolo import YOLOv3
+# dont directly import YOLOv3 cause circular import
+from model import newyolo
 
 
 def _state_dict_is_dp(state_dict: Dict) -> bool:
@@ -100,7 +101,7 @@ def build_model(cfg_path: Optional[str], weight_path: Optional[str]=None, backbo
         device_ids: DataParallel所使用的设备ID。
         qat: 为真时返回QAT模型。
         backend: 量化操作使用的后端。目前只有'fbgemm'和'qnnpack'。为None时，
-            尝试从weight_path state_dict中的'backend'参数获取，获取失败默认采用'fbgemm'。
+            尝试从weight_path state_dict中的'backend'参数获取，获取失败默认采用'qnnpack'。
         quantized: 为真时返回量化模型。
 
     Returns:
@@ -128,7 +129,10 @@ def build_model(cfg_path: Optional[str], weight_path: Optional[str]=None, backbo
         # 如果cfg_path没有的话，从state_dict中的'cfg'参数加载cfg
         cfg = StringIO(state_dict['cfg'])
 
-    model = YOLOv3(cfg, qat or quantized)
+    # 权重是QAT或量化的，或者要返回QAT或量化模型，都需要做fuse和prepare_qat
+    is_need_fuse = state_dict_type in {'qat', 'quant'} or qat or quantized
+    # qat或量化模型都需要替换模型的一些部分，比如ReLU6->ReLU
+    model = newyolo.YOLOv3(cfg, is_need_fuse)
     if dataparallel:
         model = torch.nn.DataParallel(model, device_ids)
 
@@ -141,13 +145,12 @@ def build_model(cfg_path: Optional[str], weight_path: Optional[str]=None, backbo
         load_weight(model, weight)
         print('resumed at %d steps from %s' % (model_info['step'], weight_path))
 
-    # 权重是QAT或量化的，或者要返回QAT或量化模型，都需要做fuse和prepare_qat
-    if state_dict_type in {'qat', 'quant'} or qat or quantized:
+    if is_need_fuse:
         fuse_model(model, inplace=True)
         if backend is None:
             backend = model_info.get('backend')
             if backend not in {'fbgemm', 'qnnpack'}:
-                backend = 'fbgemm'
+                backend = 'qnnpack'
         prepare_qat(model, backend=backend, inplace=True)
     if state_dict_type == 'qat':
         load_weight(model, weight)
@@ -177,7 +180,7 @@ def fuse_model(model: nn.Module, inplace: bool=True) -> nn.Module:
     Args:
         model: 网络模型。
         inplace: 是否原地融合。
-    
+
     Returns:
         nn.Module: 融合后的网络模型。
     '''
@@ -198,7 +201,7 @@ def prepare_qat(model: nn.Module, backend: str='fbgemm', inplace: bool=True) -> 
         model: 网络模型。必须是已经经过融合的。
         backend: 量化操作后端，'fbgemm', 'qnnpack'之一。
         inplace: 是否原地。
-    
+
     Returns:
         nn.Module: QAT模型。
     '''
@@ -212,14 +215,24 @@ def quantized_model(model: nn.Module, inplace: bool=False) -> nn.Module:
     Args:
         model: 网络模型。必须是QAT模型。
         inplace: 是否原地转换。
-    
+
     Returns:
         nn.Module: 量化模型。
     '''
     new_model = _condition_copy_model(model, inplace)
-    # 目前量化模型pytorch只支持CPU
-    quant_model = torch.quantization.convert(new_model.eval().cpu(), inplace=inplace)
+    # 目前pytorch量化模型只支持CPU推理
+    quant_model = torch.quantization.convert(_bare_model(new_model).eval().cpu(), inplace=inplace)
     return quant_model.eval()
+
+def print_quantized_state_dict(state_dict: Dict[str, Any]):
+    for k, v in state_dict.items():
+        if k.split('.')[-1] in {'scale', 'zero_point'}:
+            print(f'{k}<{v.dtype}>: {v.detach().numpy()}')
+        elif k.split('.')[-1] == 'weight':
+            print(f'{k}<{v.dtype}>: {list(v.shape)}'
+                f'(scale={v.q_scale()}, zero_point={v.q_zero_point()})')
+        else:
+            print(f'{k}<{v.dtype}>: {list(v.shape)}')
 
 def get_bn_layers(model: nn.Module) -> List[nn.BatchNorm2d]:
     '''遍历整个模型，根据layer的`_notprune` attr得到所有需要稀疏化的BN layers。
