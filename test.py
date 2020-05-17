@@ -16,7 +16,9 @@ from dataset.sample import SampleGetter
 from eval.evaluator import Evaluator, convert_pred
 
 
-def onnx_model(onnx_path: str, cuda: bool=True):
+# onnxruntime.set_default_logger_severity(0)
+
+def onnx_model_for_benchmark(onnx_path: str, cuda: bool=True):
 
     def model(x: np.ndarray):
         ort_input = {ort_session.get_inputs()[0].name: x}
@@ -28,19 +30,35 @@ def onnx_model(onnx_path: str, cuda: bool=True):
     ort_session = onnxruntime.InferenceSession(onnx_path, providers=providers)
     return model
 
-def evaluate(config, args):
+def onnx_model_for_eval(onnx_path: str, cuda: bool=True):
+    onnx_model = onnx_model_for_benchmark(onnx_path, cuda)
+
+    def model(x: torch.Tensor):
+        return torch.from_numpy(onnx_model(x.numpy()))
+
+    return model
+
+def torch_model_for_eval(cfg_path: str, weight_path: str, qat=False, quant=False):
     model = tools.build_model(
-        cfg.model.cfg_path, args.weight, None, device=args.device, dataparallel=True
+        cfg.model.cfg_path, args.weight, None, device=args.device,
+        dataparallel=not(quant), qat=qat, quantized=quant,
     )[0]
+    model.eval()
+    return model
+
+def evaluate(config, args):
+    if args.onnx:
+        model = onnx_model_for_eval(args.onnx, args.device == 'cuda')
+    else:
+        model = torch_model_for_eval(args.cfg, args.weight)
     eval_dataset = EvalDataset(config)
     evaluator = Evaluator(model, eval_dataset, config)
-    model.eval()
     mAP = evaluator.evaluate()
     for kls, acc in mAP.classes.items():
         print('AP@{} = {:.2f}%'.format(kls, acc*100))
     print('mAP = {:.2f}%'.format(mAP.mean*100))
 
-def prepare_images(files: List[str], process: Callable):
+def _prepare_images(files: List[str], process: Callable):
     sg = SampleGetter(None, mode='test')
     images = []
     for f in files:
@@ -65,7 +83,7 @@ def benchmark_onnx(config, args):
     with open(config.dataset.eval_txt_file, 'r') as fr:
         files = [line.strip() for line in fr.readlines() if len(line.strip()) != 0][:100]
 
-    model = onnx_model(args.onnx, args.device == 'cuda')
+    model = onnx_model_for_benchmark(args.onnx, args.device == 'cuda')
     size = size_fix(args.size)
 
     # warm up
@@ -79,7 +97,7 @@ def benchmark_onnx(config, args):
         augment.HWCtoCHW(),
     ])
     print('loading images')
-    images = prepare_images(files, process)
+    images = _prepare_images(files, process)
 
     total_timer = tools.TicToc('TOTAL')
     forward_timer = tools.TicToc('FORWARD')
@@ -128,7 +146,7 @@ def benchmark(config, args):
         augment.ToTensor(args.device),
     ])
     print('loading images')
-    images = prepare_images(files, process)
+    images = _prepare_images(files, process)
 
     # warm up
     print('warmimg up')
@@ -168,8 +186,9 @@ def benchmark(config, args):
         _print_statistics(s)
 
 def model_summary(config, args):
-    model = tools.build_model(args.cfg, device='cpu', dataparallel=False)[0]
-    summary(model, torch.zeros((1, 3, args.size, args.size)))
+    model = tools.build_model(args.cfg, args.weight, device='cpu', dataparallel=False, quantized=True)[0]
+    # print(model)
+    # summary(model, torch.zeros((1, 3, args.size, args.size)))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="test configuration")
@@ -181,7 +200,6 @@ if __name__ == "__main__":
     parser.add_argument('--iou', help='test AP iou', type=int, default=0.5)
     parser.add_argument('--nms-iou', help='NMS iou', type=int, default=0.45)
     parser.add_argument('--threshold', help='test score threshold', type=float, default=0.1)
-    parser.add_argument('--bs', help='batch size', type=int, default=16)
     parser.add_argument('--device', help='device', type=str, default='cuda')
     parser.add_argument('--qat', help='QAT model', action='store_true', default=False)
     parser.add_argument('--quant', help='quantized model', action='store_true', default=False)

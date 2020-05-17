@@ -8,6 +8,7 @@ from tqdm import tqdm
 
 import tools
 from config import size_fix
+from typing import Callable
 
 Label = namedtuple('Label', ['bboxes', 'seen', 'difficult'])
 MAP = namedtuple('MAP', ['mean', 'classes'])
@@ -43,9 +44,11 @@ def convert_pred(batch_pred_bbox: torch.Tensor,
     bboxes = torch.cat([pred_coor, pred_prob], dim=-1) # (B, ?, 4+C)
     return bboxes
 
+_model_t = Callable[[torch.Tensor], torch.Tensor]
+
 class Evaluator:
 
-    def __init__(self, model: nn.DataParallel, dataset: DataLoader, config):
+    def __init__(self, model: _model_t, dataset: DataLoader, config):
         self._score_threshold = config.eval.score_threshold
         self._iou_threshold = config.eval.iou_threshold
         self._map_iou = config.eval.map_iou
