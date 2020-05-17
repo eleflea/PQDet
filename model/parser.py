@@ -94,15 +94,28 @@ class ShortCut(nn.Module):
         return x
 
 class Route(nn.Module):
-    def __init__(self, quant: bool=False):
+    def __init__(self, quant: bool=False, single: bool=False):
         super().__init__()
         self.quant = quant
-        self.ffunc = FloatFunctional()
+        self.single = single
+        if not single:
+            self.ffunc = FloatFunctional()
 
     def forward(self, xs):
+        if self.single:
+            return xs[0]
         if self.quant:
             return self.ffunc.cat(xs, dim=1)
         return torch.cat(xs, dim=1)
+
+def build_center_grid(height, width) -> torch.Tensor:
+    shiftx = torch.arange(0, height, dtype=torch.float32) + 0.5
+    shifty = torch.arange(0, width, dtype=torch.float32) + 0.5
+    shifty, shiftx = torch.meshgrid(shiftx, shifty)
+    shiftx = shiftx.unsqueeze(-1)
+    shifty = shifty.unsqueeze(-1)
+    xy_grid = torch.stack([shiftx, shifty], dim=-1)
+    return xy_grid
 
 class Decode(nn.Module):
     def __init__(self, num_classes: int, stride: int):
@@ -112,12 +125,7 @@ class Decode(nn.Module):
         self.grid_size = (0, 0)
 
     def respawn_grid(self, height, width, device):
-        shiftx = torch.arange(0, height, dtype=torch.float32) + 0.5
-        shifty = torch.arange(0, width, dtype=torch.float32) + 0.5
-        shifty, shiftx = torch.meshgrid(shiftx, shifty)
-        shiftx = shiftx.unsqueeze(-1)
-        shifty = shifty.unsqueeze(-1)
-        self.xy_grid = torch.stack([shiftx, shifty], dim=-1).to(device)
+        self.xy_grid = build_center_grid(height, width).to(device)
         self.grid_size = (height, width)
 
     def forward(self, conv):
@@ -136,6 +144,7 @@ class Decode(nn.Module):
         if out_size_h > self.grid_size[0] or out_size_w > self.grid_size[1]:
             self.respawn_grid(round(out_size_h*1.2), round(out_size_w*1.2), conv.device)
         xy_grid = self.xy_grid[:out_size_h, :out_size_w, ...].to(conv.device)
+        # xy_grid = build_center_grid(out_size_h, out_size_w).to(conv.device)
 
         # decode xy
         pred_xymin = (xy_grid - torch.exp(conv_raw_dx1dy1)) * self.stride
@@ -306,10 +315,12 @@ class Parser():
                 setattr(layers[-1], '_notprune', True)
                 setattr(layers[l['from']], '_notprune', True)
             elif name == 'route':
-                blocks = Route(quant)
                 layer_indexes = l['layers']
+                single = False
                 if isinstance(layer_indexes, int):
+                    single = True
                     layer_indexes = [layer_indexes]
+                block = Route(quant, single)
                 setattr(blocks, '_layers', layer_indexes)
                 input_channels = sum(layers[li]._output_channels for li in layer_indexes)
                 stride = layers[layer_indexes[0]]._stride
