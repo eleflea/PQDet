@@ -36,6 +36,9 @@ DEFAULT_LAYERS = {
         'alpha': 1, # not use
         'beta': 1, # not use
     },
+    'scale_channels': {
+        'name': 'scale_channels',
+    },
     'route': {
         'name': 'route',
         'layers': -1,
@@ -46,6 +49,11 @@ DEFAULT_LAYERS = {
         'stride': 1,
         'pad': 0,
         'padding': 0,
+    },
+    'avgpool': {
+        'name': 'avgpool',
+        'height': 1,
+        'width': 1,
     },
     'upsample': {
         'name': 'upsample',
@@ -80,7 +88,8 @@ class ShortCut(nn.Module):
     def __init__(self, activation: str, quant: bool=False):
         super().__init__()
         self.quant = quant
-        self.ffunc = FloatFunctional()
+        if quant:
+            self.ffunc = FloatFunctional()
         self.act = None
         if activation != 'linear':
             self.act = ACTIVATION_MAP[activation]()
@@ -92,6 +101,19 @@ class ShortCut(nn.Module):
             return self.ffunc.add(x, other)
         x += other
         return x
+
+class ScaleChannels(nn.Module):
+    def __init__(self, quant: bool=False):
+        super().__init__()
+        self.quant = quant
+        if quant:
+            self.ffunc = FloatFunctional()
+
+    def forward(self, x, other):
+        if self.quant:
+            return self.ffunc.mul(x, other)
+        other *= x
+        return other
 
 class Route(nn.Module):
     def __init__(self, quant: bool=False, single: bool=False):
@@ -170,6 +192,9 @@ class YOLOLayer(nn.Module):
             return x
         losses = loss_per_scale(x, *target, self.opt)
         return losses
+
+def _solve_padding(size: int, padding: int, pad: Union[bool, int]):
+    return size // 2 if bool(pad) else padding
 
 UnionLA = Union[Layer, Attr]
 
@@ -289,7 +314,7 @@ class Parser():
                 continue
             if name == 'convolutional':
                 blocks = nn.Sequential()
-                padding = l['size'] // 2 if l['pad'] == 1 else l['padding']
+                padding = _solve_padding(l['size'], l['padding'], l['pad'])
                 bias = l['batch_normalize'] == 0
                 blocks.add_module('conv', nn.Conv2d(
                     input_channels,
@@ -310,26 +335,36 @@ class Parser():
                         act = nn.ReLU()
                     blocks.add_module('act', act)
             elif name == 'shortcut':
+                # TODO: check channel number match
                 blocks = ShortCut(l['activation'], quant)
                 setattr(blocks, '_from', l['from'])
                 setattr(layers[-1], '_notprune', True)
                 setattr(layers[l['from']], '_notprune', True)
+            elif name == 'scale_channels':
+                # TODO: check channel number match
+                blocks = ScaleChannels(quant)
+                setattr(blocks, '_from', l['from'])
+                stride = layers[l['from']]._stride
             elif name == 'route':
                 layer_indexes = l['layers']
                 single = False
                 if isinstance(layer_indexes, int):
                     single = True
                     layer_indexes = [layer_indexes]
-                block = Route(quant, single)
+                blocks = Route(quant, single)
                 setattr(blocks, '_layers', layer_indexes)
                 input_channels = sum(layers[li]._output_channels for li in layer_indexes)
                 stride = layers[layer_indexes[0]]._stride
                 strides = [not(layers[li]._stride - stride) for li in layer_indexes]
                 assert all(strides), 'not all route layer strides is same'
             elif name == 'maxpool':
-                padding = l['size'] // 2 if l['pad'] == 1 else l['padding']
+                padding = _solve_padding(l['size'], l['padding'], l['pad'])
                 blocks = nn.MaxPool2d(l['size'], stride=l['stride'], padding=padding)
                 stride *= l['stride']
+            elif name == 'avgpool':
+                blocks = nn.AdaptiveAvgPool2d((l['height'], l['width']))
+                # TODO: 此处不能再用 stride 表示了，需要用别的方式处理
+                stride = None
             elif name == 'upsample':
                 blocks = nn.UpsamplingNearest2d(scale_factor=l['stride'])
                 stride //= l['stride']
@@ -339,6 +374,8 @@ class Parser():
                 opt['stride'] = stride
                 blocks = YOLOLayer(opt)
                 setattr(layers[-1], '_notprune', True)
+            else:
+                raise ValueError(f"unsupport layer type: '{name}'")
 
             setattr(blocks, '_output_channels', input_channels)
             setattr(blocks, '_stride', stride)
