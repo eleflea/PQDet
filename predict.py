@@ -7,7 +7,7 @@ import tools
 from config import cfg
 from dataset import augment
 from eval.evaluator import convert_pred
-from model.newyolo import YOLOv3
+from model.interpreter import PModel
 
 
 def add_hook(model, name, hook_fn=None):
@@ -31,7 +31,7 @@ def main(args):
     class_names = cfg.dataset.classes
     device = torch.device('cpu')
 
-    model = YOLOv3(args.cfg)
+    model = PModel(args.cfg)
     # print(model)
     state_dict = torch.load(args.weight, map_location=device)
     torch.nn.DataParallel(model).load_state_dict(state_dict['model'])

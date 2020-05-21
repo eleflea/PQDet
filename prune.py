@@ -5,7 +5,7 @@ from thop import clever_format, profile
 from torch import nn
 
 from config import cfg
-from model.newyolo import YOLOv3
+from model.interpreter import PModel
 from pruning.pruner import SlimmingPruner
 
 
@@ -14,7 +14,7 @@ def prune(config):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     gpus = config.system.gpus
 
-    model_fun = lambda: nn.DataParallel(YOLOv3(cfg_path).to(device), device_ids=gpus)
+    model_fun = lambda: nn.DataParallel(PModel(cfg_path).to(device), device_ids=gpus)
     sp = SlimmingPruner(model_fun, config)
     sp.prune()
 

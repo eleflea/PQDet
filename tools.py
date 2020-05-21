@@ -10,8 +10,8 @@ import numpy as np
 import torch
 from torch import nn
 
-# dont directly import YOLOv3 cause circular import
-from model import newyolo
+# dont directly import PModel cause circular import
+from model import interpreter
 
 
 def _state_dict_is_dp(state_dict: Dict) -> bool:
@@ -132,7 +132,7 @@ def build_model(cfg_path: Optional[str], weight_path: Optional[str]=None, backbo
     # 权重是QAT或量化的，或者要返回QAT或量化模型，都需要做fuse和prepare_qat
     is_need_fuse = state_dict_type in {'qat', 'quant'} or qat or quantized
     # qat或量化模型都需要替换模型的一些部分，比如ReLU6->ReLU
-    model = newyolo.YOLOv3(cfg, is_need_fuse)
+    model = interpreter.PModel(cfg, is_need_fuse)
     if dataparallel:
         model = torch.nn.DataParallel(model, device_ids)
 
