@@ -1,13 +1,12 @@
-import math
 from collections import namedtuple
 from itertools import chain
-from typing import Callable, List, Sequence, Tuple, Union, Any
+from typing import Any, Callable, List, Sequence, Tuple, Union
 
 import cv2
 import numpy as np
 import torch
 from numpy import random
-
+from math import ceil
 
 _size_T = Union[List[int], Tuple[int, int]]
 _triplet_T = Union[List[float], Tuple[float, float, float]]
@@ -15,8 +14,62 @@ _range_T = Union[List[float], Tuple[float, float]]
 _transform_T = Callable[[Any, np.ndarray], Tuple[np.ndarray, np.ndarray]]
 _sampler_T = Callable[[], Tuple[np.ndarray, np.ndarray]]
 _bboxes_T = Union[List, np.ndarray]
+_aware_size_T = Union[_size_T, Callable[[], _size_T]]
+
+
+def _filter_bboxes_by_iou_area_ratio(original_bboxes: _bboxes_T, new_bboxes: _bboxes_T,
+    iou_threshold=0.3, area_threshold=56, ratio_threshold=10) -> np.ndarray:
+    w = new_bboxes[:, 2] - new_bboxes[:, 0]
+    h = new_bboxes[:, 3] - new_bboxes[:, 1]
+    area = w * h
+    area0 = (original_bboxes[:, 2] - original_bboxes[:, 0]) *\
+        (original_bboxes[:, 3] - original_bboxes[:, 1])
+    ratio = np.maximum(w / (h + 1e-16), h / (w + 1e-16))  # aspect ratio
+    i = (area > area_threshold) & (area / (area0 + 1e-16) > iou_threshold) & (ratio < ratio_threshold)
+    return new_bboxes[i]
+
+def _resolve_aware_size(aware_size: _aware_size_T) -> _size_T:
+    return aware_size() if callable(aware_size) else aware_size
+
+def quantize_number(n, q: int, round_func=round) -> int:
+    """Converts a number to closest non-zero int divisible by q."""
+    return int(round_func(n / q) * q)
 
 class RandomCrop:
+
+    def __init__(self, size: _size_T, p=0.5,
+        iou_threshold=0.3, area_threshold=56, ratio_threshold=10):
+        self.size = size
+        self.p = p
+        self.iou_threshold = iou_threshold
+        self.area_threshold = area_threshold
+        self.ratio_threshold = ratio_threshold
+
+    def __call__(self, img: np.ndarray, bboxes: _bboxes_T):
+        if random.random() > self.p:
+            return img, bboxes
+        h, w = img.shape[:2]
+        ch, cw = self.size
+        crop_xmin = random.randint(0, w - cw + 1)
+        crop_ymin = random.randint(0, h - ch + 1)
+        crop_xmax = crop_xmin + cw
+        crop_ymax = crop_ymin + ch
+        img = img[crop_ymin:crop_ymax, crop_xmin:crop_xmax, :]
+
+        if len(bboxes) == 0:
+            return img, bboxes
+
+        new_bboxes = bboxes.copy()
+        new_bboxes[:, [0, 2]] = np.clip(new_bboxes[:, [0, 2]] - crop_xmin, 0, cw)
+        new_bboxes[:, [1, 3]] = np.clip(new_bboxes[:, [1, 3]] - crop_ymin, 0, ch)
+        new_bboxes = _filter_bboxes_by_iou_area_ratio(
+            bboxes, new_bboxes, iou_threshold=self.iou_threshold,
+            area_threshold=self.area_threshold, ratio_threshold=self.ratio_threshold
+        )
+
+        return img, new_bboxes
+
+class RandomSafeCrop:
 
     def __init__(self, p=0.5):
         self.p = p
@@ -24,7 +77,7 @@ class RandomCrop:
     def __call__(self, img: np.ndarray, bboxes: _bboxes_T):
         if random.random() > self.p:
             return img, bboxes
-        h, w= img.shape[:2]
+        h, w = img.shape[:2]
         # 得到可以包含所有bbox的最小bbox
         if len(bboxes) > 0:
             max_bbox = np.concatenate([
@@ -58,6 +111,21 @@ class RandomHFlip:
 
         if len(bboxes) != 0:
             bboxes[:, [0, 2]] = w - bboxes[:, [2, 0]]
+        return img, bboxes
+
+class RandomVFlip:
+
+    def __init__(self, p=0.5):
+        self.p = p
+
+    def __call__(self, img: np.ndarray, bboxes: _bboxes_T):
+        if random.random() > self.p:
+            return img, bboxes
+        h = img.shape[0]
+        img = img[::-1, :, :]
+
+        if len(bboxes) != 0:
+            bboxes[:, [1, 3]] = h - bboxes[:, [3, 1]]
         return img, bboxes
 
 Operation = namedtuple('Operation', ['func', 'params_range'])
@@ -146,8 +214,6 @@ class DeNormalize:
         np.clip((img * self.std + self.mean)*255., 0, 255, out=img)
         return img.astype(np.uint8), bboxes
 
-_aware_size_T = Union[_size_T, Callable[[], _size_T]]
-
 class Resize:
 
     def __init__(self, size: _aware_size_T, pad_val: int=128):
@@ -155,10 +221,7 @@ class Resize:
         self.size = size
 
     def __call__(self, img: np.ndarray, bboxes: _bboxes_T):
-        if callable(self.size):
-            target_h, target_w = self.size()
-        else:
-            target_h, target_w = self.size
+        target_h, target_w = _resolve_aware_size(self.size)
         img_h, img_w = img.shape[:2]
 
         resize_ratio = min(target_w / img_w, target_h / img_h)
@@ -178,6 +241,31 @@ class Resize:
         if len(bboxes) != 0:
             bboxes[:, [0, 2]] = bboxes[:, [0, 2]] * resize_ratio + dl
             bboxes[:, [1, 3]] = bboxes[:, [1, 3]] * resize_ratio + du
+        return img_padded, bboxes
+
+class PadNearestDivisor:
+
+    def __init__(self, pad_val: int=128, divisor: int=32):
+        self.pad_val = pad_val
+        self.divisor = divisor
+
+    def __call__(self, img: np.ndarray, bboxes: _bboxes_T):
+        img_h, img_w = img.shape[:2]
+        target_h = quantize_number(img_h, self.divisor, round_func=ceil)
+        target_w = quantize_number(img_w, self.divisor, round_func=ceil)
+
+        dl = (target_w - img_w) // 2
+        dr = target_w - img_w - dl
+        du = (target_h - img_h) // 2
+        dd = target_h - img_h - du
+        img_padded = np.pad(
+            img, ((du, dd), (dl, dr), (0, 0)),
+            'constant', constant_values=self.pad_val
+        )
+
+        if len(bboxes) != 0:
+            bboxes[:, [0, 2]] += dl
+            bboxes[:, [1, 3]] += du
         return img_padded, bboxes
 
 class Mixup:
@@ -204,6 +292,8 @@ class Mixup:
         bboxes = self.mixup_bboxes(bboxes, lam)
         bboxes_mix = self.mixup_bboxes(bboxes_mix, 1-lam)
         bboxes_no_empty = [b for b in [bboxes, bboxes_mix] if len(b) != 0]
+        if len(bboxes_no_empty) == 0:
+            return img, np.zeros([1, 6], dtype=np.float32)
         bboxes = np.concatenate(bboxes_no_empty)
         return img, bboxes
 
@@ -256,13 +346,9 @@ class Mosaic:
 
         img4 = img4[input_h // 2: input_h // 2 + input_h, input_w // 2: input_w // 2 + input_w]
 
-        w = bboxes4[:, 2] - bboxes4[:, 0]
-        h = bboxes4[:, 3] - bboxes4[:, 1]
-        area = w * h
-        area0 = (all_bboxes_copy[:, 2] - all_bboxes_copy[:, 0]) * (all_bboxes_copy[:, 3] - all_bboxes_copy[:, 1])
-        ar = np.maximum(w / (h + 1e-16), h / (w + 1e-16))  # aspect ratio
-        i = (w > 8) & (h > 8) & (area / (area0 + 1e-16) > 0.25) & (ar < 10)
-        bboxes4 = bboxes4[i]
+        bboxes4 = _filter_bboxes_by_iou_area_ratio(
+            all_bboxes_copy, bboxes4, iou_threshold=0.25, area_threshold=64
+        )
 
         return img4, bboxes4
 

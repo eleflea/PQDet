@@ -58,6 +58,7 @@ class TrainDataset(Dataset):
         self._color_p = config.augment.color_p
         self._mixup_p = config.augment.mixup_p
         self._hflip_p = config.augment.hflip_p
+        self._vflip_p = config.augment.vflip_p
         self._crop_p = config.augment.crop_p
 
         with open(self._dataset_file, 'r') as fr:
@@ -80,7 +81,8 @@ class TrainDataset(Dataset):
         ])
         self.augment = augment.Compose([
             augment.RandomHFlip(p=self._hflip_p),
-            augment.RandomCrop(p=self._crop_p),
+            augment.RandomVFlip(p=self._vflip_p),
+            augment.RandomSafeCrop(p=self._crop_p),
             augment.ColorJitter(
                brightness=[-0.1, 0.1],
                contrast=[0.8, 1.2],
@@ -125,7 +127,7 @@ class TrainDataset(Dataset):
         image, bboxes = self.get_sample(self._shuffle_indexes[index])
         # image, bboxes = self.mosaic(image, bboxes)
         image, bboxes = self.mixup(image, bboxes)
-        labels = self.create_label3(bboxes, output_sizes)
+        labels = self.create_label(bboxes, output_sizes)
         return (image, *labels)
 
     def create_label(self, bboxes, output_sizes):

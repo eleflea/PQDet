@@ -24,7 +24,7 @@ def read_sample(img_path: str):
 def process_sample(img, bboxes: np.ndarray):
     process = augment.Compose([
         augment.RandomHFlip(p=0.5),
-        augment.RandomCrop(p=0.75),
+        augment.RandomSafeCrop(p=0.75),
         augment.CutOut(p=0.8, size=30, n_holes=3),
         augment.ColorJitter(
             brightness=[-0.1, 0.1],
