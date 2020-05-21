@@ -38,9 +38,9 @@ def onnx_model_for_eval(onnx_path: str, cuda: bool=True):
 
     return model
 
-def torch_model_for_eval(cfg_path: str, weight_path: str, qat=False, quant=False):
+def torch_model_for_eval(cfg_path: str, weight_path: str, device: str='cuda', qat=False, quant=False):
     model = tools.build_model(
-        cfg.model.cfg_path, args.weight, None, device=args.device,
+        cfg_path, weight_path, None, device=device,
         dataparallel=not(quant), qat=qat, quantized=quant,
     )[0]
     model.eval()
@@ -50,7 +50,7 @@ def evaluate(config, args):
     if args.onnx:
         model = onnx_model_for_eval(args.onnx, args.device == 'cuda')
     else:
-        model = torch_model_for_eval(args.cfg, args.weight)
+        model = torch_model_for_eval(args.cfg, args.weight, device=args.device)
     eval_dataset = EvalDataset(config)
     evaluator = Evaluator(model, eval_dataset, config)
     mAP = evaluator.evaluate()
@@ -193,10 +193,12 @@ def model_summary(config, args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="test configuration")
     parser.add_argument('mode', help='test mode', type=str, choices=('eval', 'benchmark', 'summary'))
+    parser.add_argument('--yaml', default='yamls/yolo-lite.yaml', required=False)
     parser.add_argument('--cfg', help='model cfg file', required=False)
     parser.add_argument('--weight', help='model weight', required=False)
     parser.add_argument('--onnx', help='onnx file', required=False)
     parser.add_argument('--size', help='test image size', type=int, default=512)
+    parser.add_argument('--bs', help='batch size', type=int, default=48)
     parser.add_argument('--iou', help='test AP iou', type=int, default=0.5)
     parser.add_argument('--nms-iou', help='NMS iou', type=int, default=0.45)
     parser.add_argument('--threshold', help='test score threshold', type=float, default=0.1)
@@ -205,12 +207,14 @@ if __name__ == "__main__":
     parser.add_argument('--quant', help='quantized model', action='store_true', default=False)
     parser.add_argument('--backend', help='quantized backend', type=str, default='qnnpack')
     args = parser.parse_args()
-    cfg.model.cfg_path = args.cfg
+    if args.yaml:
+        cfg.merge_from_file(args.yaml)
+    if args.cfg:
+        cfg.model.cfg_path = args.cfg
     cfg.eval.input_size = args.size
     cfg.eval.score_threshold = args.threshold
     cfg.eval.iou_threshold = args.nms_iou
     cfg.eval.map_iou = args.iou
-    cfg.dataset.eval_txt_file = cfg.dataset.eval_txt_file
     cfg.eval.batch_size = args.bs
     cfg.freeze()
     {
