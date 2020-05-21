@@ -82,9 +82,11 @@ _C.augment = CN()
 # 数据增强中mix up方法应用的概率
 _C.augment.mixup_p: float = 0.5
 # 数据增强中color jitter方法应用的概率
-_C.augment.color_p: float = 1.
+_C.augment.color_p: float = 0.
 # 数据增强中horizon flip方法应用的概率
 _C.augment.hflip_p: float = 0.5
+# 数据增强中vertical flip方法应用的概率
+_C.augment.vflip_p: float = 0.
 # 数据增强中random crop方法应用的概率
 _C.augment.crop_p: float = 0.75
 
