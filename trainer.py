@@ -43,6 +43,8 @@ class Trainer:
         # sparse
         self._sparse_train = config.sparse.switch
         self._sparse_ratio = config.sparse.ratio
+        # prune
+        self._prune_ratio = config.prune.ratio
         # quant
         self._quant_train = config.quant.switch
         self._quant_backend = config.quant.backend
@@ -325,7 +327,7 @@ class Trainer:
         self._clear_history = True
         self._eval_after = 0
         self._sparse_train = False
-        self._weight_base_name = 'pruned-model'
+        self._weight_base_name = f'pruned-{round(self._prune_ratio*100)}-model'
         self.run()
 
 if __name__ == "__main__":
