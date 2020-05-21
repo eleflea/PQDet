@@ -1,15 +1,10 @@
-from copy import deepcopy
-
 import torch
-from torch import nn
 
+from config import get_device
 from dataset.eval_dataset import EvalDataset
 from eval.evaluator import Evaluator
 from pruning import block as PB
-from pruning.block import Conv2d
 from trainer import Trainer
-from config import get_device
-
 
 CFG_NET_SEGMENT = '''[net]
 # Testing
@@ -57,19 +52,24 @@ class SlimmingPruner:
         self.block_map = {
             'convolutional': PB.Conv2d,
             'maxpool': PB.Pool,
+            'avgpool': PB.Pool,
             'upsample': PB.Upsample,
             'yolo': PB.YOLO,
             'shortcut': PB.ShortCut,
+            'scale_channels': PB.ScaleChannels,
             'route': PB.Route
         }
 
     def prune(self):
         for i, layer in enumerate(self.new_model.module.module_list):
-            if layer._type in {'convolutional', 'maxpool', 'upsample', 'yolo'}:
+            if layer._type in {'convolutional', 'maxpool', 'avgpool', 'upsample', 'yolo'}:
                 input_layers = [] if len(self.blocks) == 0 else [self.blocks[-1]]
             elif layer._type == 'shortcut':
                 self.blocks[layer._from].keep_out = True
                 self.blocks[-1].keep_out = True
+                input_layers = [self.blocks[layer._from], self.blocks[-1]]
+            elif layer._type == 'scale_channels':
+                self.blocks[-1].constrain_layer = self.blocks[layer._from]
                 input_layers = [self.blocks[layer._from], self.blocks[-1]]
             elif layer._type == 'route':
                 input_layers = [self.blocks[li] for li in layer._layers]
@@ -81,7 +81,7 @@ class SlimmingPruner:
         bns = []
         maxbn = []
         for b in self.blocks:
-            if isinstance(b, Conv2d) and b.bn_scale is not None:
+            if isinstance(b, PB.Conv2d) and b.bn_scale is not None:
                 bns.extend(b.bn_scale.tolist())
                 maxbn.append(b.bn_scale.max().item())
 
@@ -90,7 +90,10 @@ class SlimmingPruner:
         prune_limit = (sorted_bns == min(maxbn)).nonzero().item() / len(bns)
         print('prune limit: {}'.format(prune_limit))
         if self._prune_ratio > prune_limit:
-            raise AssertionError('prune ratio bigger than limit')
+            # raise AssertionError('prune ratio bigger than limit')
+            # since we have tackle prune-out issue in conv2d block (see block.py)
+            # we wont raise an error but a warning
+            print('the layer reached prune limit will be cast to 16 channels.')
 
         thre_index = int(bns.shape[0] * self._prune_ratio)
         thre = sorted_bns[thre_index]

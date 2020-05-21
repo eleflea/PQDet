@@ -12,6 +12,7 @@ class Baselayer:
         self.modules = modules
         self.out_mask = None
         self.keep_out = keep_out
+        self.constrain_layer = None
 
     def prune(self, threshold) -> int:
         self.out_mask = self.input_layers[0].out_mask
@@ -79,6 +80,14 @@ class Conv2d(Baselayer):
             raise ValueError('input of conv layer must be 0 or 1')
         conv_layer = self.modules.conv
 
+        # conv with bias in constrain
+        if self.constrain_layer is not None and self.bn_scale is None:
+            constrain_mask = self.constrain_layer.out_mask
+            conv_layer.weight.data = state_dict[0][constrain_mask, input_mask, :, :].clone()
+            conv_layer.bias.data = state_dict[1][constrain_mask].clone()
+            self.out_mask = constrain_mask
+            return constrain_mask.numel() - constrain_mask.nonzero().size(0)
+
         # conv with bias
         if self.bn_scale is None:
             conv_layer.weight.data = state_dict[0][:, input_mask, :, :].clone()
@@ -106,6 +115,8 @@ class Conv2d(Baselayer):
         # normal conv+bn
         divisor = 8
         thres_index = ((self.bn_scale.gt(threshold).sum().item() + divisor - 1) // divisor) * divisor
+        # here we ensure number of remaining channels more than 16
+        thres_index = max(16, thres_index)
         picked_bn_indexes = torch.sort(self.bn_scale, descending=True)[1][:thres_index]
         prune_mask = torch.zeros_like(self.bn_scale, dtype=torch.bool)
         prune_mask[picked_bn_indexes] = 1
@@ -143,4 +154,7 @@ class Upsample(Baselayer):
     pass
 
 class YOLO(Baselayer):
+    pass
+
+class ScaleChannels(Baselayer):
     pass
