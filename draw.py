@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from model.newyolo import YOLOv3
+from model.interpreter import PModel
 import matplotlib.pyplot as plt
 import numpy as np
 import json
@@ -12,7 +12,7 @@ def state_dict_from_path(weight: str):
     return state_dict['model']
 
 def model_with_weight(cfg_path: str, weight: str):
-    model = nn.DataParallel(YOLOv3(cfg_path))
+    model = nn.DataParallel(PModel(cfg_path))
     state_dict = state_dict_from_path(weight)
     model.load_state_dict(state_dict)
     return model
@@ -52,16 +52,29 @@ def get_sorted_bn(state_dict):
     return sorted_bns
 
 def draw_compare_channel(weight, pruned_weight):
+    english = [
+        'layers',
+        'channels',
+        'remaining channels',
+        'pruned channels',
+    ]
+    chinese = [
+        '层数',
+        '通道数',
+        '剪枝后通道数目',
+        '剪枝部分',
+    ]
+    language = english
     ori_chan_nums = get_channel_nums(state_dict_from_path(weight))
     pruned_chan_nums = get_channel_nums(state_dict_from_path(pruned_weight))
     assert len(ori_chan_nums) == len(pruned_chan_nums), 'differnt conv layer amount'
     diff_chan_nums = ori_chan_nums - pruned_chan_nums
     fig, ax = plt.subplots(figsize=(8, 4))
     X = np.arange(1, len(ori_chan_nums)+1)
-    plt.xlabel('层数')
-    plt.ylabel('通道数')
-    ax.bar(X, pruned_chan_nums, label='剪枝后通道数目')
-    ax.bar(X, diff_chan_nums, bottom=pruned_chan_nums, label='剪枝部分')
+    plt.xlabel(language[0])
+    plt.ylabel(language[1])
+    ax.bar(X, pruned_chan_nums, label=language[2])
+    ax.bar(X, diff_chan_nums, bottom=pruned_chan_nums, label=language[3])
     plt.legend()
     return fig
 
@@ -92,10 +105,10 @@ if __name__ == "__main__":
     # ]
     # labels = ['正常训练', '稀疏训练', '稀疏训练微调后']
     # draw_multi_bn_scatter(weights, labels)
-    draw_evol('evol.json')
+    # draw_evol('evol.json')
 
-    # weights = ['weights/model-74-0.7724.pt', 
-    # 'weights/pruned-model-26-0.7569.pt'
-    # ]
-    # draw_compare_channel(*weights)
-    plt.show()
+    weights = ['weights/rsod_std_sparse/model-499-0.8978.pt', 
+    'weights/rsod_std_sparse/pruned-85-model-194-0.9081.pt'
+    ]
+    draw_compare_channel(*weights)
+    plt.savefig('draw.png')
