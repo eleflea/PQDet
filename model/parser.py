@@ -95,11 +95,12 @@ class ShortCut(nn.Module):
             self.act = ACTIVATION_MAP[activation]()
 
     def forward(self, x, other):
+        if self.quant:
+            x = self.ffunc.add(x, other)
+        else:
+            x += other
         if self.act is not None:
             x = self.act(x)
-        if self.quant:
-            return self.ffunc.add(x, other)
-        x += other
         return x
 
 class ScaleChannels(nn.Module):
