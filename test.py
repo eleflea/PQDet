@@ -5,6 +5,7 @@ import torch
 import onnx
 import onnxruntime
 from torchsummaryX import summary
+from thop import clever_format, profile
 from tqdm import tqdm
 import numpy as np
 
@@ -185,9 +186,13 @@ def benchmark(config, args):
         s['percent'] = s['mean'] / stats[0]['mean']
         _print_statistics(s)
 
-def model_summary(config, args):
-    model = tools.build_model(args.cfg, args.weight, device='cpu', dataparallel=False, quantized=True)[0]
+def model_summary(_, args):
+    model = tools.build_model(args.cfg, args.weight, device='cpu', dataparallel=False)[0]
     # print(model)
+    inputs = torch.randn(1, 3, 512, 512)
+    flops, params = profile(model, inputs=(inputs, ), verbose=False)
+    flops, params = clever_format([flops, params], "%.3f")
+    print('FLOPs: {}, params: {}'.format(flops, params))
     # summary(model, torch.zeros((1, 3, args.size, args.size)))
 
 if __name__ == "__main__":
