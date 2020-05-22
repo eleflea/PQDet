@@ -69,7 +69,7 @@ def export_normal_to_onnx(cfg_path: str, weight_path: str, onnx_path: str):
     )
 
 def partial(weight_path: str, save_path: str, layers: int):
-    state_dict = torch.load(weight_path, map_location=torch.device('cpu'))['model']
+    state_dict = torch.load(weight_path, 'cpu')['model']
     partial_dict = {}
     sentinel = f'{layers+1}.'
     for key, params in state_dict.items():
@@ -78,11 +78,23 @@ def partial(weight_path: str, save_path: str, layers: int):
         partial_dict[key] = params
     torch.save(partial_dict, save_path)
 
+def make_backbone(weight_path: str, cfg_path: str, save_path: str):
+    state_dict = torch.load(weight_path, 'cpu')['state_dict']
+    model = tools.build_model(cfg_path, device='cpu', dataparallel=False)[0]
+    new_state_dict = {}
+    for (bn, bp), (mn, mp) in zip(state_dict.items(), model.state_dict().items()):
+        if not bp.shape == mp.shape:
+            print(f'last layer: {bn}({list(bp.shape)}) -> {mn}({list(mp.shape)})')
+            break
+        new_state_dict[mn] = bp
+    torch.save(new_state_dict, save_path)
+
 if __name__ == "__main__":
     weight_path = 'weights/VOC_std_prune40_quant/model-77-0.7674.pt'
     # partial(weight_path, 'weights/pretrained/mobilev2-prune40.pt', 61)
     # weight_path = 'weights/VOC_quant3/model-44.pt'
     # weight_path = 'weights/trained/model-74-0.7724.pt'
     # save_weight_to_darknet(weight_path, weight_path.rsplit('.', 1)[0]+'-convert.weights')
-    export_quantized_to_onnx('model/cfg/myolo-prune-40.cfg', weight_path, 'export/quant_myolov1.onnx')
+    # export_quantized_to_onnx('model/cfg/myolo-prune-40.cfg', weight_path, 'export/quant_myolov1.onnx')
     # export_normal_to_onnx('model/cfg/myolo-prune-40.cfg', weight_path, 'export/myolo-prune40.onnx')
+    make_backbone('/home/eleflea/code/classifier/regnet_600m_741.pth', 'model/cfg/regnetx-600m-yolo.cfg', 'weights/pretrained/regnetx_600m.pt')
