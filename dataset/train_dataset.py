@@ -127,7 +127,7 @@ class TrainDataset(Dataset):
         image, bboxes = self.get_sample(self._shuffle_indexes[index])
         # image, bboxes = self.mosaic(image, bboxes)
         image, bboxes = self.mixup(image, bboxes)
-        labels = self.create_label(bboxes, output_sizes)
+        labels = self.create_label3(bboxes, output_sizes)
         return (image, *labels)
 
     def create_label(self, bboxes, output_sizes):
