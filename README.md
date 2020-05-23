@@ -21,3 +21,4 @@
     + [ ] COCO
     + [ ] DOTA
 - [ ] 实现对任意 groups 卷积的剪枝方法（RegNet有此需求）
+- [ ] 在 onnx 的 benchmark 中，不要再引入 torch 的参与，这样时间测不准。
