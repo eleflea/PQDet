@@ -14,6 +14,28 @@ from torch import nn
 from model import interpreter
 
 
+def compute_time(model: nn.Module, times: int=64, input_size=(3, 512, 512), batch_size: int=1):
+    torch.backends.cudnn.benchmark = True
+    model.eval()
+    input_shape = [batch_size] + list(input_size)
+    inputs = torch.zeros(*input_shape).cuda(non_blocking=False)
+
+    timer = TicToc()
+    warmup_iter = 10
+    with torch.no_grad():
+        for cur_iter in range(times + warmup_iter):
+            # Reset the timers after the warmup phase
+            if cur_iter == warmup_iter:
+                timer.reset()
+            # Forward
+            timer.tic()
+            model(inputs)
+            torch.cuda.synchronize()
+            timer.toc()
+    torch.backends.cudnn.benchmark = False
+    # ns -> ms
+    return timer.mean() / 1e6
+
 def _state_dict_is_dp(state_dict: Dict) -> bool:
     '''通过检查`state_dict`的第一个key是否以`module.`
     开头来判断`state_dict`是否有DataParallel。

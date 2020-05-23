@@ -74,7 +74,10 @@ def _print_statistics(statistic: Dict[str, Any]):
             stat[k] /= 1e6
         elif k == 'percent':
             stat[k] *= 100
-    print('{} ({:.1f}%):'.format(stat['name'], stat['percent']))
+    if stat.get('percent') is None:
+        print('{}:'.format(stat['name']))
+    else:
+        print('{} ({:.1f}%):'.format(stat['name'], stat['percent']))
     print('\tAverage: {:.2f}±{:.3f} ms'.format(stat['mean'], stat['3std']))
     print('\tRange: {:.2f} ms ~ {:.2f} ms'.format(stat['min'], stat['max']))
 
@@ -105,7 +108,7 @@ def benchmark_onnx(config, args):
     convert_timer = tools.TicToc('CONVERT')
     nms_timer = tools.TicToc('NMS')
 
-    input_shape = torch.FloatTensor(size).to(args.device)
+    input_shape = torch.FloatTensor(size).to(args.device, non_blocking=False)
     threshold = args.threshold
     nms_iou = args.nms_iou
     for image, shape in tqdm(images):
@@ -137,7 +140,7 @@ def benchmark(config, args):
         files = [line.strip() for line in fr.readlines() if len(line.strip()) != 0][:100]
 
     model = tools.build_model(
-        cfg.model.cfg_path, args.weight, None, device=args.device, dataparallel=False,
+        config.model.cfg_path, args.weight, None, device=args.device, dataparallel=False,
         qat=args.qat, quantized=args.quant, backend=args.backend,
     )[0]
     size = size_fix(args.size)
@@ -149,33 +152,36 @@ def benchmark(config, args):
     print('loading images')
     images = _prepare_images(files, process)
 
-    # warm up
-    print('warmimg up')
-    for _ in range(5):
-        with torch.no_grad():
-            model(torch.rand(1, 3, *size).to(args.device))
-
     total_timer = tools.TicToc('TOTAL')
     forward_timer = tools.TicToc('FORWARD')
     convert_timer = tools.TicToc('CONVERT')
     nms_timer = tools.TicToc('NMS')
 
+    input_shape = torch.FloatTensor(size).to(args.device, non_blocking=False)
+    threshold = args.threshold
+    nms_iou = args.nms_iou
+
+    # warm up
+    print('warmimg up')
     with torch.no_grad():
-        input_shape = torch.FloatTensor(size).to(args.device)
-        threshold = args.threshold
-        nms_iou = args.nms_iou
+        for _ in range(5):
+            model(torch.rand(1, 3, *size).to(args.device))
+            torch.cuda.synchronize()
         for image, shape in tqdm(images):
-            image = image.unsqueeze_(0).to(args.device)
-            shape = shape.unsqueeze_(0).to(args.device)
+            image = image.unsqueeze_(0).to(args.device, non_blocking=False)
+            shape = shape.unsqueeze_(0).to(args.device, non_blocking=False)
             total_timer.tic()
             forward_timer.tic()
             pred = model(image)
+            torch.cuda.synchronize()
             forward_timer.toc()
             convert_timer.tic()
             bboxes = convert_pred(pred, input_shape, shape)[0]
+            torch.cuda.synchronize()
             convert_timer.toc()
             nms_timer.tic()
             tools.torch_nms(bboxes, threshold, nms_iou)
+            torch.cuda.synchronize()
             nms_timer.toc()
             total_timer.toc()
 
@@ -192,12 +198,23 @@ def model_summary(_, args):
     inputs = torch.randn(1, 3, 512, 512)
     flops, params = profile(model, inputs=(inputs, ), verbose=False)
     flops, params = clever_format([flops, params], "%.3f")
-    print('FLOPs: {}, params: {}'.format(flops, params))
+    print('MACs: {}, params: {}'.format(flops, params))
     # summary(model, torch.zeros((1, 3, args.size, args.size)))
+
+def time_forward(config, args):
+    model = tools.build_model(
+        config.model.cfg_path, args.weight, None, device=args.device, dataparallel=False,
+        qat=args.qat, quantized=args.quant, backend=args.backend,
+    )[0]
+    size = args.size
+    avg_time = tools.compute_time(model, input_size=(3, size, size), batch_size=args.bs)
+    print(f'{avg_time:.2f} ms')
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="test configuration")
-    parser.add_argument('mode', help='test mode', type=str, choices=('eval', 'benchmark', 'summary'))
+    parser.add_argument(
+        'mode', help='test mode', type=str, choices=('eval', 'benchmark', 'summary', 'time')
+    )
     parser.add_argument('--yaml', default='yamls/yolo-lite.yaml', required=False)
     parser.add_argument('--cfg', help='model cfg file', required=False)
     parser.add_argument('--weight', help='model weight', required=False)
@@ -226,4 +243,5 @@ if __name__ == "__main__":
         'eval': evaluate,
         'benchmark': benchmark_onnx if args.onnx else benchmark,
         'summary': model_summary,
+        'time': time_forward,
     }[args.mode](cfg, args)
