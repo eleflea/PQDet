@@ -94,12 +94,14 @@ def loss_per_scale(pred, label, bboxes, opt):
     prob_loss = cls_loss_gain * class_focal * respond_bbox * bce_loss(pred_prob, label_prob)
 
     # sum up
-    bbox_loss = (bbox_loss * label_mixw).sum([1, 2, 3, 4]).mean()
-    conf_loss = (conf_loss * label_mixw).sum([1, 2, 3, 4]).mean()
-    prob_loss = (prob_loss * label_mixw).sum([1, 2, 3, 4]).mean()
+    bbox_loss = (bbox_loss * label_mixw).sum([1, 2, 3, 4]).mean(dim=0, keepdim=True)
+    conf_loss = (conf_loss * label_mixw).sum([1, 2, 3, 4]).mean(dim=0, keepdim=True)
+    prob_loss = (prob_loss * label_mixw).sum([1, 2, 3, 4]).mean(dim=0, keepdim=True)
     loss = bbox_loss + conf_loss + prob_loss
 
     if torch.isnan(loss):
-        print('xy: {}, conf: {}, cls: {}'.format(bbox_loss, conf_loss, prob_loss))
+        print('xy: {}, conf: {}, cls: {}'.format(
+            bbox_loss.item(), conf_loss.item(), prob_loss.item()
+        ))
         raise RuntimeError('NaN in loss')
     return loss, bbox_loss, conf_loss, prob_loss
