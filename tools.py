@@ -3,7 +3,6 @@ import os
 from abc import ABCMeta, abstractmethod
 from copy import deepcopy
 from io import StringIO
-from time import time_ns
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 import numpy as np
@@ -12,6 +11,14 @@ from torch import nn
 
 # dont directly import PModel cause circular import
 from model import interpreter
+
+try:
+    from time import time_ns
+except ImportError:
+    from time import time
+
+    def time_ns():
+        return int(time() * 1e9)
 
 
 def compute_time(model: nn.Module, times: int=64, input_size=(3, 512, 512), batch_size: int=1):
@@ -191,7 +198,7 @@ def _condition_copy_model(model: nn.Module, inplace: bool=True) -> nn.Module:
     new_model = deepcopy(model)
     return new_model
 
-def _bare_model(model: nn.Module):
+def bare_model(model: nn.Module):
     if _model_is_dp(model):
         return model.module
     return model
@@ -207,7 +214,7 @@ def fuse_model(model: nn.Module, inplace: bool=True) -> nn.Module:
         nn.Module: 融合后的网络模型。
     '''
     new_model = _condition_copy_model(model, inplace)
-    bare_model = _bare_model(new_model)
+    bare_model = bare_model(new_model)
     for layer in bare_model.module_list:
         if layer._type == 'convolutional':
             names = [name for name, _ in layer.named_children() if name in {'conv', 'bn', 'act'}]
@@ -243,7 +250,7 @@ def quantized_model(model: nn.Module, inplace: bool=False) -> nn.Module:
     '''
     new_model = _condition_copy_model(model, inplace)
     # 目前pytorch量化模型只支持CPU推理
-    quant_model = torch.quantization.convert(_bare_model(new_model).eval().cpu(), inplace=inplace)
+    quant_model = torch.quantization.convert(bare_model(new_model).eval().cpu(), inplace=inplace)
     return quant_model.eval()
 
 def print_quantized_state_dict(state_dict: Dict[str, Any]):
@@ -267,7 +274,7 @@ def get_bn_layers(model: nn.Module) -> List[nn.BatchNorm2d]:
     '''
     bn_layers = []
     c = 0
-    for l in _bare_model(model).module_list:
+    for l in bare_model(model).module_list:
         if l._type == 'convolutional' and hasattr(l, 'bn'):
             if not hasattr(l, '_notprune'):
                 bn_layers.append(l.bn)
