@@ -1,0 +1,35 @@
+experiment_name: VOC_nas
+
+system:
+  gpus: [0, 1]
+  num_workers: 6
+
+dataset:
+  train_txt_file: /home/eleflea/ramdata/Pascal_voc/train.txt
+  eval_txt_file: /home/eleflea/ramdata/Pascal_voc/2007_test.txt
+
+model:
+  cfg_path: model/cfg/NOFOUND.cfg
+
+train:
+  # scheduler: 'step'
+  max_epochs: 100
+  batch_size: 32
+  input_sizes: [320, 352, 384, 416]
+  learning_rate_init: 4e-4
+
+weight:
+  backbone: ''
+
+augment:
+  # mixup_p: 0.38
+  # color_p: 0.25
+  # hflip_p: 0.5
+  # crop_p: 0.65
+  color_p: 0.
+
+eval:
+  after: 5
+  input_size: 352
+  batch_size: 80
+  # partial: 2000
