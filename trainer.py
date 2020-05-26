@@ -142,9 +142,12 @@ class Trainer:
     def init_model(self):
         if self._quant_train:
             print('quantization aware training')
-        self.model, model_info = tools.build_model(self._cfg_path, self._resume_weight, self._backbone_weight,
-            device=self._device, clear_history=self._clear_history, dataparallel=False if self._quant_train else True,
-            device_ids=self._gpus, qat=self._quant_train, backend=self._quant_backend)
+        self.model, model_info = tools.build_model(
+            self._cfg_path, self._resume_weight, self._backbone_weight,
+            device=self._device, clear_history=self._clear_history,
+            dataparallel=not self._quant_train, device_ids=self._gpus,
+            qat=self._quant_train, backend=self._quant_backend
+        )
         self.global_step = model_info.get('step', 0)
         # 计算恢复的轮数
         self.init_eopch = self.global_step // self._steps_per_epoch
@@ -300,6 +303,26 @@ class Trainer:
                 # 重新设置为训练模式
                 self.model.train()
             self.save(epoch)
+
+    def run_nas(self, model):
+        self._warmup_epochs = 0.5
+        self.model = model
+        self.init_dataset()
+        self._steps_per_epoch = len(self.train_dataloader)
+        self._loss_print_interval = self._steps_per_epoch // 5
+        self.init_evaluator()
+        self.init_optimizer()
+        self.init_losses()
+        self.model.train()
+        for epoch in range(0, self._eval_after + 1):
+            self.epoch_tt.tic()
+            self.train_epoch(epoch)
+            self.epoch_tt.toc()
+            print('{:.3f}s per epoch'.format(self.epoch_tt.sum_reset()/1e9))
+
+            if epoch >= self._eval_after:
+                self.model.eval()
+                return self.evaluator.evaluate().mean
 
     def run(self):
         tools.ensure_dir(self._weights_dir)
