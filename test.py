@@ -13,8 +13,8 @@ import tools
 from config import cfg, size_fix
 from dataset import augment
 from dataset.eval_dataset import EvalDataset
-from dataset.sample import SampleGetter
-from eval.evaluator import Evaluator, convert_pred
+from dataset import SAMPLE_GETTER_REGISTER, RECOVER_BBOXES_REGISTER
+from eval.evaluator import Evaluator
 
 
 # onnxruntime.set_default_logger_severity(0)
@@ -42,7 +42,7 @@ def onnx_model_for_eval(onnx_path: str, cuda: bool=True):
 def torch_model_for_eval(cfg_path: str, weight_path: str, device: str='cuda', qat=False, quant=False):
     model = tools.build_model(
         cfg_path, weight_path, None, device=device,
-        dataparallel=not(quant), qat=qat, quantized=quant,
+        dataparallel=not(quant) and device=='cuda', qat=qat, quantized=quant,
     )[0]
     model.eval()
     return model
@@ -54,13 +54,11 @@ def evaluate(config, args):
         model = torch_model_for_eval(args.cfg, args.weight, device=args.device)
     eval_dataset = EvalDataset(config)
     evaluator = Evaluator(model, eval_dataset, config)
-    mAP = evaluator.evaluate()
-    for kls, acc in mAP.classes.items():
-        print('AP@{} = {:.2f}%'.format(kls, acc*100))
-    print('mAP = {:.2f}%'.format(mAP.mean*100))
+    AP = evaluator.evaluate()
+    tools.print_metric(AP)
 
 def _prepare_images(files: List[str], process: Callable):
-    sg = SampleGetter(None, mode='test')
+    sg = SAMPLE_GETTER_REGISTER['voc'](mode='test', classes=None)
     images = []
     for f in files:
         image, shape = sg(f)
@@ -119,7 +117,9 @@ def benchmark_onnx(config, args):
         pred = model(image)
         forward_timer.toc()
         convert_timer.tic()
-        bboxes = convert_pred(torch.from_numpy(pred).to(args.device), input_shape, shape)[0]
+        bboxes = RECOVER_BBOXES_REGISTER[args.dataset](
+            torch.from_numpy(pred).to(args.device), input_shape, shape
+        )[0]
         convert_timer.toc()
         nms_timer.tic()
         tools.torch_nms(bboxes, threshold, nms_iou)
@@ -176,7 +176,7 @@ def benchmark(config, args):
             torch.cuda.synchronize()
             forward_timer.toc()
             convert_timer.tic()
-            bboxes = convert_pred(pred, input_shape, shape)[0]
+            bboxes = RECOVER_BBOXES_REGISTER[args.dataset](pred, input_shape, shape)[0]
             torch.cuda.synchronize()
             convert_timer.toc()
             nms_timer.tic()
@@ -219,10 +219,11 @@ if __name__ == "__main__":
     parser.add_argument('--cfg', help='model cfg file', required=False)
     parser.add_argument('--weight', help='model weight', required=False)
     parser.add_argument('--onnx', help='onnx file', required=False)
+    parser.add_argument('--dataset', help='dataset name', required=False)
     parser.add_argument('--size', help='test image size', type=int, default=512)
     parser.add_argument('--bs', help='batch size', type=int, default=48)
     parser.add_argument('--iou', help='test AP iou', type=int, default=0.5)
-    parser.add_argument('--nms-iou', help='NMS iou', type=int, default=0.45)
+    parser.add_argument('--nms-iou', help='NMS iou', type=float, default=0.45)
     parser.add_argument('--threshold', help='test score threshold', type=float, default=0.1)
     parser.add_argument('--device', help='device', type=str, default='cuda')
     parser.add_argument('--qat', help='QAT model', action='store_true', default=False)
@@ -231,6 +232,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.yaml:
         cfg.merge_from_file(args.yaml)
+        if args.dataset is None:
+            args.dataset = cfg.dataset.name.lower()
     if args.cfg:
         cfg.model.cfg_path = args.cfg
     cfg.eval.input_size = args.size
