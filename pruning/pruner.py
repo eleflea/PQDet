@@ -1,5 +1,6 @@
 import torch
 
+import tools
 from config import get_device
 from dataset.eval_dataset import EvalDataset
 from eval.evaluator import Evaluator
@@ -128,11 +129,8 @@ class SlimmingPruner:
         evaluator = Evaluator(self.new_model, dataloader, self.cfg)
         self.new_model.eval()
         AP = evaluator.evaluate()
-        APs = AP.classes
-        # 打印每类结果
-        for klass in APs:
-            print('AP@%s = %.4f' % (klass, APs[klass]))
-        print('mAP = %.4f' % AP.mean)
+        # 打印
+        tools.print_metric(AP)
 
     def finetune(self):
         trainer = Trainer(self.cfg)
