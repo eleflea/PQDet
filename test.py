@@ -215,7 +215,7 @@ if __name__ == "__main__":
     parser.add_argument(
         'mode', help='test mode', type=str, choices=('eval', 'benchmark', 'summary', 'time')
     )
-    parser.add_argument('--yaml', default='yamls/yolo-lite.yaml', required=False)
+    parser.add_argument('--yaml', default='yamls/voc.yaml', required=False)
     parser.add_argument('--cfg', help='model cfg file', required=False)
     parser.add_argument('--weight', help='model weight', required=False)
     parser.add_argument('--onnx', help='onnx file', required=False)

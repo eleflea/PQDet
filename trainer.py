@@ -369,7 +369,7 @@ class Trainer:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='trainer configuration')
-    parser.add_argument('--yaml', default='yamls/yolo-lite.yaml')
+    parser.add_argument('--yaml', default='yamls/voc.yaml')
     parser.add_argument(
         'opts',
         help='Modify config options using the command-line',

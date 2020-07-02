@@ -60,7 +60,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="test configuration")
-    parser.add_argument('--yaml', default='yamls/yolo-lite.yaml', required=False)
+    parser.add_argument('--yaml', default='yamls/voc.yaml', required=False)
     parser.add_argument('--dataset', default='voc', help='dataset name')
     parser.add_argument('--cfg', help='model cfg file')
     parser.add_argument('--weight', help='model weight')
