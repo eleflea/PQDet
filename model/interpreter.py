@@ -19,9 +19,9 @@ _TARGET_MAP = {
     32: item_getter(2, 5),
 }
 
-class PModel(nn.Module):
+class AnyModel(nn.Module):
 
-    def __init__(self, cfg: Union[str, IO], quant: bool=False):
+    def __init__(self, cfg: Union[str, IO], quant: bool=False, onnx: bool=False):
         super().__init__()
         self.quant = quant
         self.qstub = QuantStub()
@@ -29,17 +29,20 @@ class PModel(nn.Module):
 
         if isinstance(cfg, str):
             cfg = open(cfg, 'r')
-        self.module_list = nn.ModuleList(Parser(cfg).torch_layers(quant))
+        self.module_list = nn.ModuleList(Parser(cfg).torch_layers(quant, onnx))
         cfg.close()
 
-    def forward(self, x, target=None) -> torch.Tensor:
+    def is_output(self, i, layer) -> bool:
+        return False
+
+    def forward(self, x, target=None):
         cache_outputs = []
         outputs = []
         for i, layer in enumerate(self.module_list):
             if self.quant and i == 0:
                 x = self.qstub(x)
             layer_type = layer._type
-            if layer_type in ('convolutional', 'upsample', 'maxpool', 'avgpool'):
+            if layer_type in ('convolutional', 'fc', 'upsample', 'maxpool', 'avgpool'):
                 x = layer(x)
             elif layer_type in {'shortcut', 'scale_channels'}:
                 x = layer(x, cache_outputs[layer._from])
@@ -49,22 +52,47 @@ class PModel(nn.Module):
                 if self.quant:
                     x = self.destub(x)
                 x = layer(x, _TARGET_MAP[layer._stride](target))
-                outputs.append(x)
             else:
                 raise ValueError('unknown layer type: %s' % layer_type)
+            if self.is_output(i, layer):
+                outputs.append(x)
             cache_outputs.append(x)
+        num_outputs = len(outputs)
+        if num_outputs == 0:
+            outputs = cache_outputs[-1]
+        elif num_outputs == 1:
+            outputs = outputs[0]
+        return outputs
 
+class DetectionModel(AnyModel):
+
+    def is_output(self, i, layer) -> bool:
+        return layer._type == 'yolo'
+
+    def forward(self, x, target=None):
+        outputs = super(DetectionModel, self).forward(x, target)
         if target is None:
             outputs = [output.view((output.shape[0], -1, output.shape[-1])) for output in outputs]
             return torch.cat(outputs, dim=1)
         losses = list(map(sum, zip(*outputs)))
-        return losses
+        loss_per_branch = [sum(loss[1:]) for loss in outputs]
+        return {
+            'loss': losses[0],
+            'giou_loss': losses[1],
+            'conf_loss': losses[2],
+            'class_loss': losses[3],
+            'loss_per_branch': loss_per_branch,
+        }
+
+class ClassifierModel(AnyModel):
+    pass
 
 if __name__ == "__main__":
-    # print(PModel('model/cfg/mobilenetv2-yolo.cfg').module_list)
+    Model = DetectionModel
+    # print(Model('model/cfg/mobilenetv2-yolo.cfg').module_list)
     from thop import clever_format, profile
-    model = PModel('model/cfg/mobilenetv2-yolo.cfg')
-    inputs = torch.randn(1, 3, 416, 416)
+    model = Model('model/cfg/regnety-400m-fpn.cfg')
+    inputs = torch.randn(1, 3, 512, 512)
     flops, params = profile(model, inputs=(inputs, ), verbose=False)
     flops, params = clever_format([flops, params], "%.3f")
     print("flops:{}, params: {}".format(flops, params))
