@@ -1,6 +1,7 @@
 import heapq
 import os
 from abc import ABCMeta, abstractmethod
+from collections import namedtuple
 from copy import deepcopy
 from io import StringIO
 from typing import Any, Callable, Dict, List, Optional, TypeVar
@@ -8,9 +9,11 @@ from typing import Any, Callable, Dict, List, Optional, TypeVar
 import numpy as np
 import torch
 from torch import nn
+from torchvision import ops
+import math
 
-# dont directly import PModel cause circular import
-from model import interpreter
+# dont directly import interpreter and DetectionModel cause circular import
+from model.interpreter import DetectionModel
 
 try:
     from time import time_ns
@@ -20,6 +23,43 @@ except ImportError:
     def time_ns():
         return int(time() * 1e9)
 
+
+AP = namedtuple('AP', ['mAPs', 'APs', 'AP', 'raw', 'class_names', 'iou_thresholds'])
+
+def print_metric(metric: AP, verbose=True):
+    def pad_element(x, w: int):
+        sx = str(x)
+        return sx + ' ' * (w - len(sx))
+
+    def format_percents(fs):
+        return ['{:.2f}'.format(f * 100) for f in fs]
+
+    iou_thres = metric.iou_thresholds
+    raw = metric.raw
+    if verbose:
+        class_names = metric.class_names
+        capitial = 'CLASS\\IOU'
+        col1_width = max(len(capitial), max(len(n) for n in class_names)) + 2
+    else:
+        class_names = []
+        capitial = 'IOU'
+        col1_width = 6
+    cols_width = [col1_width] + [7 for _ in range(len(iou_thres))] + [5]
+    rows = [[capitial] + np.round(iou_thres * 100).astype(np.int).tolist() + ['APs']]
+    for i, name in enumerate(class_names):
+        r = [name] + format_percents(raw[i].tolist() + [metric.APs[i]])
+        rows.append(r)
+    rows.append(['mAPs'] + format_percents(metric.mAPs.tolist() + [metric.AP]))
+    for r in rows:
+        print(''.join(pad_element(e, w) for w, e in zip(cols_width, r)))
+
+def is_sequence(x: Any) -> bool:
+    try:
+        iter(x)
+    except TypeError:
+        return False
+    else:
+        return True
 
 def compute_time(model: nn.Module, times: int=64, input_size=(3, 512, 512), batch_size: int=1):
     torch.backends.cudnn.benchmark = True
@@ -107,7 +147,7 @@ def load_backbone(model: nn.Module, state_dict: Dict):
 
 def build_model(cfg_path: Optional[str], weight_path: Optional[str]=None, backbone_path: Optional[str]=None,
     clear_history: bool=False, device='cuda', dataparallel: bool=True, device_ids=None,
-    qat: bool=False, backend: Optional[str]=None, quantized: bool=False) -> (nn.Module, Dict):
+    qat: bool=False, backend: Optional[str]=None, quantized: bool=False, onnx: bool=False) -> (nn.Module, Dict):
     '''根据输入参数构建模型。
 
     本函数可以构建普通模型、QAT模型和量化模型。
@@ -161,7 +201,7 @@ def build_model(cfg_path: Optional[str], weight_path: Optional[str]=None, backbo
     # 权重是QAT或量化的，或者要返回QAT或量化模型，都需要做fuse和prepare_qat
     is_need_fuse = state_dict_type in {'qat', 'quant'} or qat or quantized
     # qat或量化模型都需要替换模型的一些部分，比如ReLU6->ReLU
-    model = interpreter.PModel(cfg, is_need_fuse)
+    model = DetectionModel(cfg, is_need_fuse, onnx)
     if dataparallel:
         model = torch.nn.DataParallel(model, device_ids)
 
@@ -214,8 +254,8 @@ def fuse_model(model: nn.Module, inplace: bool=True) -> nn.Module:
         nn.Module: 融合后的网络模型。
     '''
     new_model = _condition_copy_model(model, inplace)
-    bare_model = bare_model(new_model)
-    for layer in bare_model.module_list:
+    bared_model = bare_model(new_model)
+    for layer in bared_model.module_list:
         if layer._type == 'convolutional':
             names = [name for name, _ in layer.named_children() if name in {'conv', 'bn', 'act'}]
             if len(names) < 2:
@@ -353,6 +393,79 @@ def giou(boxes1: torch.Tensor, boxes2: torch.Tensor):
 
     return GIOU
 
+def diou(boxes1: torch.Tensor, boxes2: torch.Tensor):
+    """
+    :param boxes1: boxes1和boxes2的shape可以不相同，但是需要满足广播机制，且需要是Tensor
+    :param boxes2: 且需要保证最后一维为坐标维，以及坐标的存储结构为(xmin, ymin, xmax, ymax)
+    :return: 返回boxes1和boxes2的IOU，IOU的shape为boxes1和boxes2广播后的shape[:-1]
+    """
+    boxes1_area = (boxes1[..., 2] - boxes1[..., 0]) * (boxes1[..., 3] - boxes1[..., 1])
+    boxes2_area = (boxes2[..., 2] - boxes2[..., 0]) * (boxes2[..., 3] - boxes2[..., 1])
+
+    # 计算出boxes1与boxes1相交部分的左上角坐标、右下角坐标
+    intersection_left_up = torch.max(boxes1[..., :2], boxes2[..., :2])
+    intersection_right_down = torch.min(boxes1[..., 2:], boxes2[..., 2:])
+
+    # 因为两个boxes没有交集时，(right_down - left_up) < 0，
+    # 所以maximum可以保证当两个boxes没有交集时，它们之间的iou为0
+    intersection = torch.max(intersection_right_down - intersection_left_up, torch.zeros_like(intersection_right_down))
+    inter_area = intersection[..., 0] * intersection[..., 1]
+    union_area = boxes1_area + boxes2_area - inter_area
+    IOU = inter_area / union_area
+
+    enclose_left_up = torch.min(boxes1[..., :2], boxes2[..., :2])
+    enclose_right_down = torch.max(boxes1[..., 2:], boxes2[..., 2:])
+    enclose = torch.max(enclose_right_down - enclose_left_up, torch.zeros_like(enclose_left_up))
+    enclose_area = enclose[..., 0] * enclose[..., 1]
+    GIOU = IOU - (enclose_area - union_area) / enclose_area
+
+    center_b1 = (boxes1[..., :2] + boxes1[..., 2:]) / 2
+    center_b2 = (boxes2[..., :2] + boxes2[..., 2:]) / 2
+    distance_center = (center_b1 - center_b2).pow(2).sum(dim=-1)
+    distance_enclose = (enclose_left_up - enclose_right_down).pow(2).sum(dim=-1)
+
+    return GIOU + distance_center / distance_enclose
+
+def ciou(boxes1: torch.Tensor, boxes2: torch.Tensor):
+    """
+    :param boxes1: boxes1和boxes2的shape可以不相同，但是需要满足广播机制，且需要是Tensor
+    :param boxes2: 且需要保证最后一维为坐标维，以及坐标的存储结构为(xmin, ymin, xmax, ymax)
+    :return: 返回boxes1和boxes2的IOU，IOU的shape为boxes1和boxes2广播后的shape[:-1]
+    """
+    b1_w, b1_h = boxes1[..., 2] - boxes1[..., 0], boxes1[..., 3] - boxes1[..., 1]
+    b2_w, b2_h = boxes2[..., 2] - boxes2[..., 0], boxes2[..., 3] - boxes2[..., 1]
+    boxes1_area = b1_w * b1_h
+    boxes2_area = b2_w * b2_h
+
+    # 计算出boxes1与boxes1相交部分的左上角坐标、右下角坐标
+    intersection_left_up = torch.max(boxes1[..., :2], boxes2[..., :2])
+    intersection_right_down = torch.min(boxes1[..., 2:], boxes2[..., 2:])
+
+    # 因为两个boxes没有交集时，(right_down - left_up) < 0，
+    # 所以maximum可以保证当两个boxes没有交集时，它们之间的iou为0
+    intersection = torch.max(intersection_right_down - intersection_left_up, torch.zeros_like(intersection_right_down))
+    inter_area = intersection[..., 0] * intersection[..., 1]
+    union_area = boxes1_area + boxes2_area - inter_area
+    IOU = inter_area / union_area
+
+    enclose_left_up = torch.min(boxes1[..., :2], boxes2[..., :2])
+    enclose_right_down = torch.max(boxes1[..., 2:], boxes2[..., 2:])
+    enclose = torch.max(enclose_right_down - enclose_left_up, torch.zeros_like(enclose_left_up))
+    enclose_area = enclose[..., 0] * enclose[..., 1]
+    GIOU = IOU - (enclose_area - union_area) / enclose_area
+
+    center_b1 = (boxes1[..., :2] + boxes1[..., 2:]) / 2
+    center_b2 = (boxes2[..., :2] + boxes2[..., 2:]) / 2
+    distance_center = (center_b1 - center_b2).pow(2).sum(dim=-1)
+    distance_enclose = (enclose_left_up - enclose_right_down).pow(2).sum(dim=-1)
+
+    v = (4 / (math.pi ** 2)) * (torch.atan(b1_w / b1_h) - torch.atan(b2_w / b2_h)).pow(2)
+    with torch.no_grad():
+        s = 1 - IOU
+        alpha = v / (s + v)
+
+    return GIOU + distance_center / distance_enclose + alpha * v
+
 def iou_xywh_numpy(boxes1: np.ndarray, boxes2: np.ndarray):
     """
     :param boxes1: boxes1和boxes2的shape可以不相同，但是需要满足广播机制
@@ -415,7 +528,7 @@ def nms(bboxes, score_threshold, iou_threshold, sigma=0.3, method='nms'):
     return np.array(best_bboxes)
 
 def torch_nms(bboxes: torch.Tensor, score_threshold: float,
-    iou_threshold: float, sigma: float=0.3, method: str='nms') -> torch.Tensor:
+    iou_threshold: float) -> torch.Tensor:
     """
     :param bboxes:
     假设有N个bbox的score大于score_threshold，那么bboxes的shape为(N, 6)，存储格式为(xmin, ymin, xmax, ymax, score, class)
@@ -424,39 +537,23 @@ def torch_nms(bboxes: torch.Tensor, score_threshold: float,
     假设NMS后剩下N个bbox，那么best_bboxes的shape为(N, 6)，存储格式为(xmin, ymin, xmax, ymax, score, class)
     其中(xmin, ymin, xmax, ymax)的大小都是相对于输入原图的，score = conf * prob，class是bbox所属类别的索引号
     """
-    device = bboxes.device
     class_scores = bboxes[:, 4:]
-    num_classes = class_scores.shape[1]
-    best_bboxes = []
-
-    for class_index in range(num_classes):
-        scores = class_scores[:, class_index]
-        pick_indeces = (scores > score_threshold).nonzero().squeeze(-1)
-        if len(pick_indeces) == 0:
-            continue
-        pick_bboxes = torch.cat([
-            bboxes[:, :4][pick_indeces],
-            scores[pick_indeces][:, None],
-            torch.full((len(pick_indeces), 1), class_index, dtype=torch.float32).to(device)
-        ], dim=1)
-        while len(pick_bboxes) > 0:
-            max_ind = torch.argmax(pick_bboxes[:, 4])
-            best_bbox = pick_bboxes[max_ind]
-            best_bboxes.append(best_bbox)
-            pick_bboxes = torch.cat([pick_bboxes[:max_ind], pick_bboxes[max_ind + 1:]])
-            iou = iou_calc3(best_bbox[None, :4], pick_bboxes[:, :4])
-            assert method in {'nms', 'soft-nms'}
-            weight = torch.ones_like(iou)
-            if method == 'nms':
-                iou_mask = iou > iou_threshold
-                weight[iou_mask] = 0.0
-            if method == 'soft-nms':
-                weight = torch.exp(-(1.0 * iou ** 2 / sigma))
-            pick_bboxes[:, 4].mul_(weight)
-            score_mask = pick_bboxes[:, 4] > score_threshold
-            pick_bboxes = pick_bboxes[score_mask]
-    # pylint: disable-msg=not-callable
-    return torch.stack(best_bboxes) if len(best_bboxes) > 0 else torch.tensor([]).to(device)
+    mask = class_scores > score_threshold
+    indexes = mask.nonzero()
+    pick_scores = class_scores[mask]
+    pick_class_indexes = indexes[:, 1]
+    pick_bboxes = bboxes[:, :4][indexes[:, 0]]
+    keep = ops.boxes.batched_nms(
+        pick_bboxes, pick_scores, pick_class_indexes, iou_threshold
+    )
+    if keep.numel() == 0:
+        # pylint: disable-msg=not-callable
+        return torch.tensor([]).to(bboxes)
+    return torch.cat([
+        pick_bboxes[keep],
+        pick_scores[keep, None],
+        pick_class_indexes[keep, None].float(),
+    ], dim=1)
 
 class AverageMeter:
     """Computes and stores the average and current value"""
