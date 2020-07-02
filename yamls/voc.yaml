@@ -1,16 +1,17 @@
-experiment_name: VOC_newstd_regnet600m_fpn_l1
+experiment_name: voc_mobilenetv2_fpn_l1_baseline
 
 system:
   gpus: [0, 1]
   num_workers: 6
 
 dataset:
+  name: voc
   train_txt_file: /home/eleflea/ramdata/Pascal_voc/train.txt
   eval_txt_file: /home/eleflea/ramdata/Pascal_voc/2007_test.txt
 
 model:
-  cfg_path: model/cfg/regnetx-600m-fpn.cfg
-  # cfg_path: model/cfg/mobilenetv2-yolo.cfg
+  # cfg_path: model/cfg/regnetx-600m-fpn.cfg
+  cfg_path: model/cfg/mobilenetv2-fpn.cfg
 
 train:
   # scheduler: 'step'
@@ -21,7 +22,7 @@ train:
   # weight_decay: 2e-3
 
 weight:
-  backbone: weights/pretrained/regnetx_600m.pt
+  backbone: weights/pretrained/mobilenetv2.pt
   # resume: weights/VOC_newstd_regnet600m_pan_nolossscale/model-20.pt
 
 augment:

@@ -10,7 +10,7 @@ dataset:
   classes: ['aircraft', 'oiltank', 'overpass', 'playground']
 
 model:
-  cfg_path: model/cfg/mobilenetv2-yolo-rsod.cfg
+  cfg_path: model/cfg/archive/mobilenetv2-fpn-rsod.cfg
 
 train:
   # scheduler: 'step'

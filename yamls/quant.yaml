@@ -9,7 +9,7 @@ dataset:
   eval_txt_file: /home/eleflea/ramdata/Pascal_voc/2007_test.txt
 
 model:
-  cfg_path: model/cfg/mobilenetv2-yolo.cfg
+  cfg_path: model/cfg/mobilenetv2-fpn.cfg
   # cfg_path: model/cfg/myolo-prune-40.cfg
 
 train:
