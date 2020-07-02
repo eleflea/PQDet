@@ -5,53 +5,35 @@ import torch
 
 import tools
 from config import cfg
-from dataset import augment
-from eval.evaluator import convert_pred
-from model.interpreter import PModel
+from dataset import EVAL_AUGMENT_REGISTER, RECOVER_BBOXES_REGISTER
+from model.interpreter import DetectionModel
 
-
-def add_hook(model, name, hook_fn=None):
-    def _warp(filename):
-        def save_hook(module, inputs, outputs):
-            print(outputs.shape)
-            data = outputs.detach().numpy()
-            data.tofile('{}.bin'.format(filename))
-        return save_hook
-
-    for i, (n, m) in enumerate(model.named_modules()):
-        if n == name:
-            if hook_fn is None:
-                hook_fn = _warp(name)
-            print('register for {}'.format(n))
-            m.register_forward_hook(hook_fn)
 
 def main(args):
-    score_threshold = 0.25
-    iou_threshold = 0.45
+    dataset_name = args.dataset
+    score_threshold = args.threshold
+    iou_threshold = args.nms_iou
     class_names = cfg.dataset.classes
     device = torch.device('cpu')
 
-    model = PModel(args.cfg)
+    model = DetectionModel(args.cfg)
     # print(model)
     state_dict = torch.load(args.weight, map_location=device)
     torch.nn.DataParallel(model).load_state_dict(state_dict['model'])
     model.to(device)
 
     image = cv2.imread(args.img)
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     # pylint: disable-msg=not-callable
     original_size = torch.tensor(image.shape[:2], device=device, dtype=torch.float32)
     input_size = torch.tensor([args.size, args.size], device=device, dtype=torch.float32)
-    preprocess = augment.Compose([
-        augment.Resize([args.size, args.size]),
-        augment.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        augment.ToTensor(device),
-    ])
+    preprocess = EVAL_AUGMENT_REGISTER[dataset_name](args.size, device)
     input_image = preprocess(image, [])[0].unsqueeze_(0)
 
     model.eval()
     with torch.no_grad():
         batch_pred_bbox = model(input_image)
-    batch_pred_bbox = convert_pred(batch_pred_bbox, input_size, original_size)
+    batch_pred_bbox = RECOVER_BBOXES_REGISTER[dataset_name](batch_pred_bbox, input_size, original_size)
 
     batch_bboxes = []
     for pred_bboxes in batch_pred_bbox:
@@ -62,6 +44,7 @@ def main(args):
         ).cpu().numpy()
         batch_bboxes.append(bboxes)
 
+    print(f'detect {len(batch_bboxes[0])} objects.')
     print(batch_bboxes[0])
 
     for box in batch_bboxes[0]:
@@ -69,6 +52,7 @@ def main(args):
         cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
         text = '{} {:.3f}'.format(class_names[int(box[-1])], box[4])
         cv2.putText(image, text, (x1, y1-5), 0, 0.4, (0, 255, 0))
+    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
     cv2.imwrite(args.img.rsplit('.', 1)[0] + '_mark.jpg', image)
     # cv2.imshow('show', image)
     # cv2.waitKey()
@@ -76,10 +60,17 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="test configuration")
+    parser.add_argument('--yaml', default='yamls/yolo-lite.yaml', required=False)
+    parser.add_argument('--dataset', default='voc', help='dataset name')
     parser.add_argument('--cfg', help='model cfg file')
     parser.add_argument('--weight', help='model weight')
 
     parser.add_argument('--size', help='test image size', type=int, default=512)
+    parser.add_argument('--nms-iou', help='NMS iou', type=int, default=0.45)
+    parser.add_argument('--threshold', help='predict score threshold', type=float, default=0.25)
     parser.add_argument('--img', help='image path', type=str)
     args = parser.parse_args()
+    if args.yaml:
+        cfg.merge_from_file(args.yaml)
+    cfg.freeze()
     main(args)
