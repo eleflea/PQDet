@@ -65,6 +65,14 @@ def loss_per_scale(pred, label, bboxes, opt):
         giou = tools.giou(pred_coor, label_coor)
         giou = giou[..., None]
         bbox_loss = respond_bbox * bbox_loss_scale * (1.0 - giou)
+    elif bbox_loss_type == 'diou':
+        diou = tools.diou(pred_coor, label_coor)
+        diou = diou[..., None]
+        bbox_loss = respond_bbox * bbox_loss_scale * (1.0 - diou)
+    elif bbox_loss_type == 'ciou':
+        ciou = tools.ciou(pred_coor, label_coor)
+        ciou = ciou[..., None]
+        bbox_loss = respond_bbox * bbox_loss_scale * (1.0 - ciou)
     elif bbox_loss_type == 'iou':
         iou = tools.iou_calc3(pred_coor, label_coor)
         iou = iou[..., None]
