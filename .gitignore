@@ -20,3 +20,8 @@ log/*
 
 # export model
 export/*.onnx
+
+TODO.md
+
+# results
+results/*
