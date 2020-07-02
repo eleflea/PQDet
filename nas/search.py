@@ -85,7 +85,7 @@ def _record_train_model(js: Optional[JSONSaver], model: nn.Module, add_record: b
 def _merge_cfg(cfg_path: str='yamls/nas.yaml'):
     cfg.merge_from_file(cfg_path)
     cfg.freeze()
-    print(cfg)
+    # print(cfg)
 
 def _add_model_record(js: JSONSaver, model: nn.Module, mAP: float):
     model = tools.bare_model(model)
@@ -120,7 +120,3 @@ if __name__ == "__main__":
     # FPN=yolo-lite, mAP=0.5812078947769721
     jp = 'results/nas2.json'
     search(jp, 500)
-    # order_model(
-    #     jp,
-    #     [{'w_in': 528, 'w_out': 280, 'd': 3, 'p': 2, 'bm': 1.0, 'gw': 40, 'stride': 32, 'merge': 0}, {'w_in': 280, 'w_out': 480, 'd': 3, 'p': 2, 'bm': 1.0, 'gw': 40, 'stride': 16, 'merge': 240}, {'w_in': 480, 'w_out': 120, 'd': 3, 'p': 2, 'bm': 1.0, 'gw': 40, 'stride': 8, 'merge': 96}]
-    # )

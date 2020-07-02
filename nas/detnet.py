@@ -82,7 +82,11 @@ class Merge(nn.Module):
 
     def __init__(self, w_in, w_out):
         super(Merge, self).__init__()
-        self.conv = nn.Conv2d(w_in, w_out, 1, 1, padding=0, bias=False)
+        self.conv = nn.Sequential(
+            nn.Conv2d(w_in, w_out, 1, 1, padding=0, bias=False),
+            nn.BatchNorm2d(w_out),
+            nn.ReLU(inplace=True),
+        )
         self.upsample = nn.UpsamplingNearest2d(scale_factor=2)
 
     def forward(self, xs):
@@ -108,7 +112,14 @@ class DetHead(nn.Module):
             outputs = [o.view((o.shape[0], -1, o.shape[-1])) for o in outputs]
             return torch.cat(outputs, dim=1)
         losses = list(map(sum, zip(*outputs)))
-        return losses
+        loss_per_branch = [sum(loss[1:]) for loss in outputs]
+        return {
+            'loss': losses[0],
+            'giou_loss': losses[1],
+            'conf_loss': losses[2],
+            'class_loss': losses[3],
+            'loss_per_branch': loss_per_branch,
+        }
 
 class DetNet(RegNet):
 
