@@ -1,0 +1,52 @@
+experiment_name: rsod_std_qat
+
+system:
+  gpus: [0, 1]
+  num_workers: 6
+
+dataset:
+  train_txt_file: /home/eleflea/ramdata/RSOD-Dataset/train.txt
+  eval_txt_file: /home/eleflea/ramdata/RSOD-Dataset/val.txt
+  classes: ['aircraft', 'oiltank', 'overpass', 'playground']
+
+model:
+  cfg_path: model/cfg/mobilenetv2-yolo-rsod.cfg
+
+train:
+  # scheduler: 'step'
+  max_epochs: 300
+  batch_size: 16
+  # input_sizes: [480, 512, 544, 576]
+  learning_rate_init: 2e-4
+
+weight:
+  backbone: ''
+  resume: weights/rsod_std_qat/model-69.pt
+  # clear_history: on
+
+augment:
+  # mixup_p: 0.38
+  # color_p: 0.25
+  hflip_p: 0.5
+  vflip_p: 0.5
+  crop_p: 1.
+  color_p: 0.
+
+eval:
+  after: 150
+  batch_size: 1
+  # partial: 10
+
+prune:
+  weight: weights/rsod_std_sparse/model-499-0.8978.pt
+  new_cfg: model/cfg/myolo-prune-rsod-80.cfg
+  ratio: 0.80
+
+# sparse:
+#   switch: on
+#   ratio: 0.1
+
+# quant:
+#   switch: on
+#   disable_observer_after: 50
+#   freeze_bn_after: 70

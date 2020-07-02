@@ -1,0 +1,47 @@
+experiment_name: VisDrone_newstd_regnet600m_fpn_l1
+
+system:
+  gpus: [0, 1]
+  num_workers: 6
+
+dataset:
+  name: visdrone
+  train_txt_file: /home/eleflea/datasets/VisDrone2019/trainval.txt
+  eval_txt_file: /home/eleflea/datasets/VisDrone2019/test.txt
+  classes: ['pedestrian', 'people', 'bicycle', 'car', 'van',
+    'truck', 'tricycle', 'awning-tricycle', 'bus', 'motor']
+
+model:
+  cfg_path: model/cfg/regnetx-600m-fpn-visdrone.cfg
+  anchors: [[9, 13], [25, 17], [16, 31], [47, 29], [32, 51], [83, 48], [61, 91], [131, 99], [210, 189]]
+  anchors_iou_threshold: 0.3
+
+train:
+  # scheduler: 'step'
+  max_epochs: 30
+  batch_size: 30
+  # input_sizes: [480, 512, 544, 576]
+  learning_rate_init: 4e-4
+
+weight:
+  backbone: weights/pretrained/regnetx_600m.pt
+  resume: weights/VisDrone_newstd_regnet600m_fpn_l1/model-6.pt
+
+augment:
+  # mixup_p: 0.38
+  # color_p: 0.25
+  # hflip_p: 0.5
+  # crop_p: 0.65
+  color_p: 0.
+
+eval:
+  after: 20
+  batch_size: 1
+  # partial: 100
+
+prune:
+  weight: weights/VOC_prune/model-0.pt
+  new_cfg: model/cfg/myolo-prune.cfg
+
+# sparse:
+#   switch: on

@@ -1,4 +1,4 @@
-experiment_name: VOC_std_ioufls
+experiment_name: VOC_newstd_regnet600m_fpn_l1
 
 system:
   gpus: [0, 1]
@@ -9,29 +9,36 @@ dataset:
   eval_txt_file: /home/eleflea/ramdata/Pascal_voc/2007_test.txt
 
 model:
-  cfg_path: model/cfg/mobilenetv2-yolo.cfg
+  cfg_path: model/cfg/regnetx-600m-fpn.cfg
+  # cfg_path: model/cfg/mobilenetv2-yolo.cfg
 
 train:
   # scheduler: 'step'
   max_epochs: 60
   batch_size: 32
   # input_sizes: [480, 512, 544, 576]
-  learning_rate_init: 2e-4
+  learning_rate_init: 4e-4
+  # weight_decay: 2e-3
 
-# weight:
-#   resume: weights/VOC_std_step60/model-29.pt
+weight:
+  backbone: weights/pretrained/regnetx_600m.pt
+  # resume: weights/VOC_newstd_regnet600m_pan_nolossscale/model-20.pt
 
 augment:
-  # mixup_p: 0
-  color_p: 0
+  # mixup_p: 0.38
+  # color_p: 0.25
+  # hflip_p: 0.5
+  # crop_p: 0.65
+  color_p: 0.
 
 eval:
   after: 40
   batch_size: 80
+  # partial: 5
 
 prune:
   weight: weights/VOC_prune/model-0.pt
   new_cfg: model/cfg/myolo-prune.cfg
 
 # sparse:
-#   on: on
+#   switch: on
