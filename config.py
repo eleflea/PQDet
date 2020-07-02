@@ -39,6 +39,8 @@ _C.system.num_workers: int = 4
 _C.experiment_name: str = 'VOC'
 
 _C.dataset = CN()
+# 训练数据集的名称。程序会使用此名称找到相应的SampleGetter
+_C.dataset.name = 'VOC'
 # 训练数据txt文件，yolo like
 _C.dataset.train_txt_file: str = '/home/eleflea/dataset/Pascal_voc/train.txt'
 # 验证数据txt文件，yolo like
@@ -55,6 +57,8 @@ _C.model.strides: Sequence[int] = [8, 16, 32]
 _C.model.gt_per_grid: int = 3
 _C.model.anchors: Sequence[Tuple[int, int]] = [(10, 13), (16, 30), (33, 23),
     (30, 61), (62, 45), (59, 119), (116, 90), (156, 198), (373, 326)]
+# 训练时根据iou指派anchor时的阈值，大于此值的anchors被激活
+_C.model.anchors_iou_threshold: float = 0.3
 
 _C.train = CN()
 # 训练时输入图像大小，List[int]或List[Tuple[int, int]]
@@ -69,6 +73,8 @@ _C.train.scheduler: str = 'cosine'
 _C.train.learning_rate_init: float = 2e-4
 # 训练结束时学习率
 _C.train.learning_rate_end: float = 1e-6
+# 权重衰减系数
+_C.train.weight_decay: float = 0.
 # step学习率规划器的里程碑
 _C.train.mile_stones: Sequence[int] = [30, 45]
 # step学习率规划器的gamma
