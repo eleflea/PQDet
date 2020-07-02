@@ -14,6 +14,32 @@ from model.loss import loss_per_scale
 Layer = namedtuple('Layer', ['name'])
 Attr = namedtuple('Attr', ['attr', 'val'])
 
+class LayerInfo:
+
+    def __init__(self):
+        # out_channels, height, width
+        self.shape = [None, None, None]
+        self.stride = 1
+
+    def update_stride(self, stride, down=False):
+        if self.stride is None:
+            return
+        if down:
+            self.stride //= stride
+        else:
+            self.stride *= stride
+
+    def set_size(self, size):
+        self.shape[1:] = size
+
+    @property
+    def channels(self):
+        return self.shape[0]
+
+    @channels.setter
+    def channels(self, channels):
+        self.shape[0] = channels
+
 DEFAULT_LAYERS = {
     'net': {
         'name': 'net',
@@ -29,6 +55,12 @@ DEFAULT_LAYERS = {
         'groups': 1,
         'activation': 'logistic',
         'batch_normalize': 0,
+    },
+    'fc': {
+        'name': 'fc',
+        'input': 1,
+        'output': 1,
+        'activation': 'logistic',
     },
     'shortcut': {
         'name': 'shortcut',
@@ -65,6 +97,9 @@ DEFAULT_LAYERS = {
         'ignore_thresh': .5,
         'bbox_loss': 'giou',
         'l1_loss_gain': 0.1,
+    },
+    'dropout': {
+        'probability': 0.5,
     }
 }
 
@@ -83,6 +118,23 @@ def str2value(ns):
         return float(ns)
     except ValueError:
         return ns
+
+class FC(nn.Module):
+    def __init__(self, input: int, output: int, activation: str):
+        super().__init__()
+        self.fc = nn.Linear(input, output)
+        self.act = None
+        if activation != 'linear':
+            self.act = ACTIVATION_MAP[activation]()
+
+        self.input = input
+
+    def forward(self, x):
+        x = x.view(self.input)
+        x = self.fc(x)
+        if self.act is not None:
+            x = self.act(x)
+        return x
 
 class ShortCut(nn.Module):
     def __init__(self, activation: str, quant: bool=False):
@@ -113,8 +165,7 @@ class ScaleChannels(nn.Module):
     def forward(self, x, other):
         if self.quant:
             return self.ffunc.mul(x, other)
-        other *= x
-        return other
+        return other * x
 
 class Route(nn.Module):
     def __init__(self, quant: bool=False, single: bool=False):
@@ -141,10 +192,11 @@ def build_center_grid(height, width) -> torch.Tensor:
     return xy_grid
 
 class Decode(nn.Module):
-    def __init__(self, num_classes: int, stride: int):
+    def __init__(self, num_classes: int, stride: int, onnx: bool=False):
         super(Decode, self).__init__()
         self.num_classes = num_classes
         self.stride = stride
+        self.onnx = onnx
         self.grid_size = (0, 0)
 
     def respawn_grid(self, height, width, device):
@@ -164,10 +216,12 @@ class Decode(nn.Module):
         conv_raw_dx1dy1, conv_raw_dx2dy2, conv_raw_conf, conv_raw_prob = torch.split(
             conv, [2, 2, 1, self.num_classes], dim=-1)
 
-        if out_size_h > self.grid_size[0] or out_size_w > self.grid_size[1]:
-            self.respawn_grid(round(out_size_h*1.2), round(out_size_w*1.2), conv.device)
-        xy_grid = self.xy_grid[:out_size_h, :out_size_w, ...].to(conv.device)
-        # xy_grid = build_center_grid(out_size_h, out_size_w).to(conv.device)
+        if self.onnx:
+            xy_grid = build_center_grid(out_size_h, out_size_w).to(conv.device)
+        else:
+            if out_size_h > self.grid_size[0] or out_size_w > self.grid_size[1]:
+                self.respawn_grid(round(out_size_h*1.2), round(out_size_w*1.2), conv.device)
+            xy_grid = self.xy_grid[:out_size_h, :out_size_w, ...].to(conv.device)
 
         # decode xy
         pred_xymin = (xy_grid - torch.exp(conv_raw_dx1dy1)) * self.stride
@@ -182,9 +236,9 @@ class Decode(nn.Module):
 
 class YOLOLayer(nn.Module):
 
-    def __init__(self, opt: dict):
+    def __init__(self, opt: dict, onnx: bool=False):
         super().__init__()
-        self.decode = Decode(opt['classes'], opt['stride'])
+        self.decode = Decode(opt['classes'], opt['stride'], onnx)
         self.opt = opt
 
     def forward(self, x, target=None):
@@ -304,21 +358,40 @@ class Parser():
         if current_layer is not None:
             yield current_layer
 
-    def torch_layers(self, quant: bool=False) -> List[nn.Module]:
-        input_channels = None
-        stride = 1
+    def torch_layers(self, quant: bool=False, onnx: bool=False) -> List[nn.Module]:
+
+        def layer_index(where: int=0):
+            return len(layers) + where + 1 if where <= 0 else where + 1
+
+        def assert_channels_match(index1: int, index2: int):
+            num_chan1 = layers[index1]._output_channels
+            num_chan2 = layers[index2]._output_channels
+            assert num_chan1 == num_chan2,\
+                '{} layer[{}]: out channels dont match between layer {}({}) and {}({})'.format(
+                    name, layer_index(), layer_index(index1), num_chan1,
+                    layer_index(index2), num_chan2
+                )
+
+        def assert_strides_match(indexes):
+            s0 = layers[indexes[0]]._stride
+            strides = [not(layers[idx]._stride - s0) for idx in indexes]
+            assert all(strides), '{} layer[{}]: not all input strides is same: {}'.format(
+                name, layer_index(), [layers[idx]._stride for idx in indexes]
+            )
+
+        layer_info = LayerInfo()
         layers = []
         for l in self.gen_layers():
             name = l['name']
             if name == 'net':
-                input_channels = l['channels']
+                layer_info.channels = l['channels']
                 continue
             if name == 'convolutional':
                 blocks = nn.Sequential()
                 padding = _solve_padding(l['size'], l['padding'], l['pad'])
                 bias = l['batch_normalize'] == 0
                 blocks.add_module('conv', nn.Conv2d(
-                    input_channels,
+                    layer_info.channels,
                     out_channels=l['filters'],
                     kernel_size=l['size'],
                     stride=l['stride'],
@@ -326,8 +399,8 @@ class Parser():
                     groups=l['groups'],
                     bias=bias,
                 ))
-                input_channels = l['filters']
-                stride *= l['stride']
+                layer_info.channels = l['filters']
+                layer_info.update_stride(l['stride'])
                 if not bias:
                     blocks.add_module('bn', nn.BatchNorm2d(l['filters']))
                 if l['activation'] != 'linear':
@@ -335,51 +408,62 @@ class Parser():
                     if quant:
                         act = nn.ReLU()
                     blocks.add_module('act', act)
+            elif name == 'fc':
+                blocks = FC(l['input'], l['output'], l['activation'])
+                layer_info.channels = l['output']
+                setattr(layers[-1], '_notprune', True)
             elif name == 'shortcut':
-                # TODO: check channel number match
+                assert_channels_match(-1, l['from'])
                 blocks = ShortCut(l['activation'], quant)
+                # init gamma of final bn to zero
+                # if l['activation'] != 'linear' and layers[-1]._type == 'convolutional'\
+                #     and hasattr(layers[-1], 'bn'):
+                #     layers[-1].bn.weight.data.zero_()
                 setattr(blocks, '_from', l['from'])
                 setattr(layers[-1], '_notprune', True)
                 setattr(layers[l['from']], '_notprune', True)
             elif name == 'scale_channels':
-                # TODO: check channel number match
+                assert_channels_match(-1, l['from'])
                 blocks = ScaleChannels(quant)
                 setattr(blocks, '_from', l['from'])
-                stride = layers[l['from']]._stride
+                layer_info.stride = layers[l['from']]._stride
             elif name == 'route':
                 layer_indexes = l['layers']
                 single = False
                 if isinstance(layer_indexes, int):
                     single = True
                     layer_indexes = [layer_indexes]
+                assert_strides_match(layer_indexes)
                 blocks = Route(quant, single)
                 setattr(blocks, '_layers', layer_indexes)
-                input_channels = sum(layers[li]._output_channels for li in layer_indexes)
-                stride = layers[layer_indexes[0]]._stride
-                strides = [not(layers[li]._stride - stride) for li in layer_indexes]
-                assert all(strides), 'not all route layer strides is same'
+                layer_info.channels = sum(layers[li]._output_channels for li in layer_indexes)
+                layer_info.stride = layers[layer_indexes[0]]._stride
             elif name == 'maxpool':
                 padding = _solve_padding(l['size'], l['padding'], l['pad'])
                 blocks = nn.MaxPool2d(l['size'], stride=l['stride'], padding=padding)
-                stride *= l['stride']
+                layer_info.update_stride(l['stride'])
             elif name == 'avgpool':
-                blocks = nn.AdaptiveAvgPool2d((l['height'], l['width']))
-                # TODO: 此处不能再用 stride 表示了，需要用别的方式处理
-                stride = None
+                size = (l['height'], l['width'])
+                blocks = nn.AdaptiveAvgPool2d(size)
+                layer_info.stride = None
+                layer_info.set_size(size)
             elif name == 'upsample':
                 blocks = nn.UpsamplingNearest2d(scale_factor=l['stride'])
-                stride //= l['stride']
+                layer_info.update_stride(l['stride'], down=True)
             elif name == 'yolo':
-                assert l['bbox_loss'] in {'giou', 'iou', 'l1'}, 'unspport bbox loss type in yolo layer'
+                assert l['bbox_loss'] in {'diou', 'ciou', 'giou', 'iou', 'l1'},\
+                    'unspport bbox loss type in yolo layer: {}'.format(l['bbox_loss'])
                 opt = l.copy()
-                opt['stride'] = stride
-                blocks = YOLOLayer(opt)
+                opt['stride'] = layer_info.stride
+                blocks = YOLOLayer(opt, onnx)
                 setattr(layers[-1], '_notprune', True)
+            elif name == 'dropout':
+                blocks = nn.Dropout(p=l['probability'])
             else:
                 raise ValueError(f"unsupport layer type: '{name}'")
 
-            setattr(blocks, '_output_channels', input_channels)
-            setattr(blocks, '_stride', stride)
+            setattr(blocks, '_output_channels', layer_info.channels)
+            setattr(blocks, '_stride', layer_info.stride)
             setattr(blocks, '_type', name)
             setattr(blocks, '_raw', l)
             layers.append(blocks)
