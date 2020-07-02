@@ -1,12 +1,12 @@
 from collections import namedtuple
 from itertools import chain
+from math import ceil
 from typing import Any, Callable, List, Sequence, Tuple, Union
 
 import cv2
 import numpy as np
 import torch
 from numpy import random
-from math import ceil
 
 _size_T = Union[List[int], Tuple[int, int]]
 _triplet_T = Union[List[float], Tuple[float, float, float]]
@@ -15,6 +15,7 @@ _transform_T = Callable[[Any, np.ndarray], Tuple[np.ndarray, np.ndarray]]
 _sampler_T = Callable[[], Tuple[np.ndarray, np.ndarray]]
 _bboxes_T = Union[List, np.ndarray]
 _aware_size_T = Union[_size_T, Callable[[], _size_T]]
+_ratio_T = Union[float, List[float], Tuple[float, float]]
 
 
 def _filter_bboxes_by_iou_area_ratio(original_bboxes: _bboxes_T, new_bboxes: _bboxes_T,
@@ -30,6 +31,13 @@ def _filter_bboxes_by_iou_area_ratio(original_bboxes: _bboxes_T, new_bboxes: _bb
 
 def _resolve_aware_size(aware_size: _aware_size_T) -> _size_T:
     return aware_size() if callable(aware_size) else aware_size
+
+def _resolve_ratio(ratio: _ratio_T) -> _range_T:
+    try:
+        iter(ratio)
+    except TypeError:
+        return (ratio, ratio)
+    return ratio
 
 def quantize_number(n, q: int, round_func=round) -> int:
     """Converts a number to closest non-zero int divisible by q."""
@@ -50,10 +58,10 @@ class RandomCrop:
             return img, bboxes
         h, w = img.shape[:2]
         ch, cw = self.size
-        crop_xmin = random.randint(0, w - cw + 1)
-        crop_ymin = random.randint(0, h - ch + 1)
-        crop_xmax = crop_xmin + cw
-        crop_ymax = crop_ymin + ch
+        crop_xmin = random.randint(0, max(w - cw, 0) + 1)
+        crop_ymin = random.randint(0, max(h - ch, 0) + 1)
+        crop_xmax = min(crop_xmin + cw, w)
+        crop_ymax = min(crop_ymin + ch, h)
         img = img[crop_ymin:crop_ymax, crop_xmin:crop_xmax, :]
 
         if len(bboxes) == 0:
@@ -83,6 +91,7 @@ class RandomSafeCrop:
             max_bbox = np.concatenate([
                 np.min(bboxes[:, 0:2], axis=0),
                 np.max(bboxes[:, 2:4], axis=0)], axis=-1)
+            max_bbox = np.round(max_bbox)
         else:
             cx, cy = w // 2, h // 2
             max_bbox = np.array([cx, cy, cx+1, cy+1])
@@ -243,6 +252,20 @@ class Resize:
             bboxes[:, [1, 3]] = bboxes[:, [1, 3]] * resize_ratio + du
         return img_padded, bboxes
 
+class ResizeRatio:
+
+    def __init__(self, size: _ratio_T):
+        self.ratio = _resolve_ratio(size)
+
+    def __call__(self, img: np.ndarray, bboxes: _bboxes_T):
+        target_h, target_w = list(map(lambda x: round(x[0] * x[1]), zip(self.ratio, img.shape[:2])))
+        image_resized = cv2.resize(img, dsize=(target_w, target_h), interpolation=cv2.INTER_LINEAR)
+
+        if len(bboxes) != 0:
+            bboxes[:, [0, 2]] *= self.ratio[1]
+            bboxes[:, [1, 3]] *= self.ratio[0]
+        return image_resized, bboxes
+
 class PadNearestDivisor:
 
     def __init__(self, pad_val: int=128, divisor: int=32):
@@ -306,10 +329,8 @@ class Mosaic:
         self.p = p
 
     def __call__(self, img: np.ndarray, bboxes: _bboxes_T):
-        if callable(self.size):
-            input_h, input_w = self.size()
-        else:
-            input_h, input_w = self.size
+        input_h, input_w = _resolve_aware_size(self.size)
+        input_h, input_w = input_h // 2, input_w // 2
         xc = int(random.uniform(input_w * 0.5, input_w * 1.5))
         yc = int(random.uniform(input_h * 0.5, input_h * 1.5))
 
@@ -344,7 +365,7 @@ class Mosaic:
         bboxes4[:, [0, 2]] = np.clip(bboxes4[:, [0, 2]] - input_w / 2, 0, input_w)
         bboxes4[:, [1, 3]] = np.clip(bboxes4[:, [1, 3]] - input_h / 2, 0, input_h)
 
-        img4 = img4[input_h // 2: input_h // 2 + input_h, input_w // 2: input_w // 2 + input_w]
+        # img4 = img4[input_h // 2: input_h // 2 + input_h, input_w // 2: input_w // 2 + input_w]
 
         bboxes4 = _filter_bboxes_by_iou_area_ratio(
             all_bboxes_copy, bboxes4, iou_threshold=0.25, area_threshold=64
@@ -370,8 +391,8 @@ class HWCtoCHW:
 
 class Empty:
 
-    def __call__(self, *args):
-        return args
+    def __call__(self, img: np.ndarray, bboxes: _bboxes_T):
+        return img, bboxes
 
 class Compose:
 
