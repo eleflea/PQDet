@@ -19,8 +19,7 @@ class Trainer:
 
     def __init__(self, config):
         # metric
-        self.mAP = None
-        self.APs = None
+        self.AP = None
         # model
         self._cfg_path = config.model.cfg_path
         # train
@@ -30,6 +29,7 @@ class Trainer:
         self._gamma = config.train.gamma
         self._init_lr = config.train.learning_rate_init
         self._end_lr = config.train.learning_rate_end
+        self._weight_decay = config.train.weight_decay
         self._warmup_epochs = config.train.warmup_epochs
         self._max_epochs = config.train.max_epochs
         # weights
@@ -158,44 +158,42 @@ class Trainer:
 
     # adam优化器
     def init_optimizer(self):
-        self.optimizer = optim.Adam(self.model.parameters(), lr=self._init_lr)
+        self.optimizer = optim.Adam(
+            self.model.parameters(), lr=self._init_lr, weight_decay=self._weight_decay
+        )
 
     def init_losses(self):
-        # 4个损失:总损失,位置损失,置信度损失,类别损失
-        # 总损失是其余3个之和,各损失均是一段时间的平均损失
+        # 5个损失:总损失,位置损失,置信度损失,类别损失,各检测头的损失
+        # 总损失是位置损失,置信度损失,类别损失3个之和,各损失均是一段时间的平均损失
+        # 各检测头的损失按顺序分别是32,16,8处的
         self.losses = {
             'loss': AverageMeter(),
-            'giou loss': AverageMeter(),
-            'conf loss': AverageMeter(),
-            'class loss': AverageMeter(),
+            'giou_loss': AverageMeter(),
+            'conf_loss': AverageMeter(),
+            'class_loss': AverageMeter(),
+            'loss_per_branch': [AverageMeter() for _ in range(3)],
         }
 
     # 评估计算mAP指标
     def eval(self):
-        mAP = self.evaluator.evaluate()
-        self.APs = mAP.classes
-        # 打印每类结果
-        for klass in self.APs:
-            print('AP@%s = %.4f' % (klass, self.APs[klass]))
-        self.mAP = mAP.mean
-        print('mAP = %.4f' % self.mAP)
-        return mAP
+        self.AP = ap = self.evaluator.evaluate()
+        # 打印
+        tools.print_metric(ap, verbose=False)
+        return ap
 
     def _clear_ap(self):
-        self.mAP = None
-        self.APs = None
+        self.AP = None
 
     def save(self, epoch):
         # 如果评估了mAP，则保存轮数和mAP值，否则只保存轮数到文件名
         base_name = self._weight_base_name
-        model_name = f'{base_name}-{epoch}.pt' if self.mAP is None\
-            else f'{base_name}-{epoch}-{self.mAP:.4f}.pt'
+        model_name = f'{base_name}-{epoch}.pt' if self.AP is None\
+            else f'{base_name}-{epoch}-{self.AP.AP:.4f}.pt'
         model_path = os.path.join(self._weights_dir, model_name)
         # 保存模型参数
         status = {
             'step': self.global_step,
-            'APs': self.APs,
-            'mAP': self.mAP,
+            'AP': self.AP,
             'model': self.model.state_dict(),
             'cfg': self.cfg,
             'type': 'qat' if self._quant_train else 'normal',
@@ -228,11 +226,11 @@ class Trainer:
 
             self.model_tt.tic()
             # 前向转播计算总损失和其他部分损失
-            loss, *partial_losses = self.model(image, (label_sbbox, label_mbbox, label_lbbox, sbbox, mbbox, lbbox))
+            losses_dict = self.model(image, (label_sbbox, label_mbbox, label_lbbox, sbbox, mbbox, lbbox))
             # 清除梯度
             self.optimizer.zero_grad()
             # 反向转播更新参数
-            loss.mean().backward()
+            losses_dict['loss'].mean().backward()
 
             # 如果稀疏训练
             if self._sparse_train:
@@ -244,17 +242,33 @@ class Trainer:
             self.model_tt.toc()
 
             # 更新每个损失的记录值
-            for name, loss_val in zip(self.losses.keys(), (l.mean().item() for l in [loss, *partial_losses])):
-                self.losses[name].update(loss_val)
+            for name, loss in losses_dict.items():
+                if isinstance(loss, torch.Tensor):
+                    self.losses[name].update(loss.mean().item())
+                else:
+                    for i, l in enumerate(loss):
+                        self.losses[name][i].update(l.mean().item())
 
             # 如果到达打印的步数
             if self.global_step % self._loss_print_interval == 0:
                 # 去除每个损失的平均值并重置
-                losses = [l.get_avg_reset() for l in self.losses.values()]
-                # 依次打印：学习率(lr);当前轮数/最大轮数(epoch);步数(step);训练总平均损失(train_loss)
+                loss_values = {}
+                for name, loss in self.losses.items():
+                    if tools.is_sequence(loss):
+                        loss_values.update(
+                            {f'{name}_{i}': l.get_avg_reset() for i, l in enumerate(loss)}
+                        )
+                    else:
+                        loss_values[name] = loss.get_avg_reset()
+
+                # 依次打印：学习率(lr);当前轮数/最大轮数(epoch);步数(step);
+                # 训练总平均损失(train_loss)=检测头0-2平均损失
                 # 位置平均损失(xy);置信度平均损失(conf);类别平均损失(cls)
-                print('lr: %.6f\tepoch: %d/%d\tstep: %d\ttrain_loss: %.3f(xy: %.3f, conf: %.3f, cls: %.3f)' %
-                    (lr, epoch, self._max_epochs, self.global_step, *losses))
+                print(f'lr: {lr:.6f}\tepoch: {epoch}/{self._max_epochs}\tstep: {self.global_step}\t'+\
+                    'train_loss: {loss:.2f}={loss_per_branch_0:.2f}+{loss_per_branch_1:.2f}+'
+                    '{loss_per_branch_2:.2f}(xy: {giou_loss:.2f}, conf: {conf_loss:.2f}, '
+                    'cls: {class_loss:.2f})'.format(**loss_values)
+                )
 
             self.dataload_tt.tic()
 
@@ -322,7 +336,7 @@ class Trainer:
 
             if epoch >= self._eval_after:
                 self.model.eval()
-                return self.evaluator.evaluate().mean
+                return self.evaluator.evaluate().AP
 
     def run(self):
         tools.ensure_dir(self._weights_dir)
@@ -331,7 +345,7 @@ class Trainer:
         # 一轮训练的步数
         self._steps_per_epoch = len(self.train_dataloader)
         # 每一轮训练打印多少次损失
-        self._loss_print_interval = self._steps_per_epoch // 10
+        self._loss_print_interval = self._steps_per_epoch // 5
         self.init_model()
         self.init_evaluator()
         self.init_optimizer()
