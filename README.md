@@ -32,6 +32,8 @@ Adapt your setting yaml file based on file in `yamls/`. You may need to change `
 
 Note: You need to scale `learning_rate_init` by number of GPUs. By default, it is 2e-4 x NUM_OF_GPUS.
 
+Dowload imagenet pretrained weights: [Baidu Yun (pw: hnr5)](https://pan.baidu.com/s/11NwfFvKZD36wzXX4uTUbGA) and [Google drive](https://drive.google.com/drive/folders/1xsSEw-realVaCYQXnngsBrmeyouKcdRp?usp=sharing). Put them in `weights/pretrained/`.
+
 Train you model by `python trainer.py --yaml dataset.yaml`.
 
 ## Eval
