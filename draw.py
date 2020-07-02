@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from model.interpreter import PModel
+from model.interpreter import DetectionModel
 import matplotlib.pyplot as plt
 import numpy as np
 import json
@@ -12,7 +12,7 @@ def state_dict_from_path(weight: str):
     return state_dict['model']
 
 def model_with_weight(cfg_path: str, weight: str):
-    model = nn.DataParallel(PModel(cfg_path))
+    model = nn.DataParallel(DetectionModel(cfg_path))
     state_dict = state_dict_from_path(weight)
     model.load_state_dict(state_dict)
     return model
@@ -99,16 +99,16 @@ def draw_evol(file_path: str):
             ax[i//4, i%4].scatter(hypers[name], fitness, c='b', s=10)
 
 if __name__ == "__main__":
-    # weights = ['weights/model-74-0.7724.pt', 
-    # 'weights/model-79-0.7421.pt',
-    # 'weights/pruned-model-26-0.7569.pt'
-    # ]
+    weights = ['weights/model-74-0.7724.pt',
+    'weights/trained/model-74-0.7724.pt',
+    'weights/trained/pruned-model-19-0.7458.pt'
+    ]
     # labels = ['正常训练', '稀疏训练', '稀疏训练微调后']
     # draw_multi_bn_scatter(weights, labels)
     # draw_evol('evol.json')
 
-    weights = ['weights/rsod_std_sparse/model-499-0.8978.pt', 
-    'weights/rsod_std_sparse/pruned-85-model-194-0.9081.pt'
-    ]
-    draw_compare_channel(*weights)
+    # weights = ['weights/rsod_std_sparse/model-499-0.8978.pt',
+    # 'weights/rsod_std_sparse/pruned-85-model-194-0.9081.pt'
+    # ]
+    draw_compare_channel(*weights[1:])
     plt.savefig('draw.png')
