@@ -92,6 +92,21 @@ You can write cfg file by yourself and add more op. See file in `model/`.
 
 This part is experimental, not good so far.
 
+## Model Zoo
+
+### VOC 07+12
+
+All models use imagenet pretrained backbone, trained on VOC 07+12 trainval set, and evaluate on VOC 07 test set.
+
+Image input size is 512x512. The evaluate code refers to cocoeval, may be ~1% higher than VOC evaluator.
+
+| model name           | AP   | AP50 | AP75 | MACs   | params | forward time (bs=1/4/16) | train time (per epoch) | GPU            | train batch size (per GPU) | train epochs | learn rate |
+|----------------------|------|------|------|--------|--------|--------------------------|------------------------|----------------|----------------------------|--------------|------------|
+| mobilenetv2-fpn.cfg  | 48.1 | 81.5 | 50.7 | 4.336G | 6.775M | 11.5/22.6/84.3ms         | 187s                   | 2x GTX 1080 Ti | 16                         | 60           | 4e-4       |
+| regnetx-600m-fpn.cfg | 48.6 | 81.6 | 51.4 | 4.387G | 7.417M | 15.9/16.5/50.9ms         | 163s                   | 2x GTX 1080 Ti | 16                         | 60           | 4e-4       |
+| regnetx-600m-pan.cfg | 48.1 | 80.9 | 51.1 | 4.210G | 7.145M | 14.4/15.2/47.9ms         | 152s                   | 2x GTX 1080 Ti | 16                         | 60           | 4e-4       |
+| regnety-400m-fpn.cfg | 48.2 | 82.2 | 50.8 | 3.324G | 5.581M | 22.9/23.3/55.6ms         | 192s                   | 2x GTX 1080 Ti | 16                         | 60           | 4e-4       |
+
 [1]: https://github.com/AlexeyAB/darknet#datasets
 [2]: https://github.com/VisDrone/VisDrone-Dataset
 [3]: http://openaccess.thecvf.com/content_ICCV_2017/papers/Liu_Learning_Efficient_Convolutional_ICCV_2017_paper.pdf
