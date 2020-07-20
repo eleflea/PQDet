@@ -27,7 +27,7 @@ def main(args):
     # pylint: disable-msg=not-callable
     original_size = torch.tensor(image.shape[:2], device=device, dtype=torch.float32)
     input_size = torch.tensor([args.size, args.size], device=device, dtype=torch.float32)
-    preprocess = EVAL_AUGMENT_REGISTER[dataset_name](args.size, device)
+    preprocess = EVAL_AUGMENT_REGISTER[dataset_name]([args.size, args.size], device)
     input_image = preprocess(image, [])[0].unsqueeze_(0)
 
     model.eval()
