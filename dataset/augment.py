@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 import torch
 from numpy import random
+import tools
 
 _size_T = Union[List[int], Tuple[int, int]]
 _triplet_T = Union[List[float], Tuple[float, float, float]]
@@ -225,9 +226,10 @@ class DeNormalize:
 
 class Resize:
 
-    def __init__(self, size: _aware_size_T, pad_val: int=128):
+    def __init__(self, size: _aware_size_T, pad_val: int=128, nopad: bool=False):
         self.pad_val = pad_val
         self.size = size
+        self.nopad = nopad
 
     def __call__(self, img: np.ndarray, bboxes: _bboxes_T):
         target_h, target_w = _resolve_aware_size(self.size)
@@ -238,14 +240,18 @@ class Resize:
         resize_h = round(resize_ratio * img_h)
         image_resized = cv2.resize(img, dsize=(resize_w, resize_h), interpolation=cv2.INTER_LINEAR)
 
-        dl = (target_w - resize_w) // 2
-        dr = target_w - resize_w - dl
-        du = (target_h - resize_h) // 2
-        dd = target_h - resize_h - du
-        img_padded = np.pad(
-            image_resized, ((du, dd), (dl, dr), (0, 0)),
-            'constant', constant_values=self.pad_val
-        )
+        if self.nopad:
+            dl = du = 0
+            img_padded = image_resized
+        else:
+            dl = (target_w - resize_w) // 2
+            dr = target_w - resize_w - dl
+            du = (target_h - resize_h) // 2
+            dd = target_h - resize_h - du
+            img_padded = np.pad(
+                image_resized, ((du, dd), (dl, dr), (0, 0)),
+                'constant', constant_values=self.pad_val
+            )
 
         if len(bboxes) != 0:
             bboxes[:, [0, 2]] = bboxes[:, [0, 2]] * resize_ratio + dl
@@ -318,7 +324,9 @@ class Mixup:
         if len(bboxes_no_empty) == 0:
             return img, np.zeros([1, 6], dtype=np.float32)
         bboxes = np.concatenate(bboxes_no_empty)
-        return img, bboxes
+        # tools.draw_bboxes_on_image(img, bboxes, 'results/mosaic_mixup.jpg')
+        # assert 0
+        return img.astype(np.float32), bboxes
 
 class Mosaic:
 
@@ -329,8 +337,9 @@ class Mosaic:
         self.p = p
 
     def __call__(self, img: np.ndarray, bboxes: _bboxes_T):
+        if random.random() > self.p:
+            return img, bboxes
         input_h, input_w = _resolve_aware_size(self.size)
-        input_h, input_w = input_h // 2, input_w // 2
         xc = int(random.uniform(input_w * 0.5, input_w * 1.5))
         yc = int(random.uniform(input_h * 0.5, input_h * 1.5))
 
@@ -357,6 +366,8 @@ class Mosaic:
                 x1b, y1b, x2b, y2b = 0, 0, min(w, x2a - x1a), min(y2a - y1a, h)
 
             img4[y1a:y2a, x1a:x2a] = image[y1b:y2b, x1b:x2b]  # img4[ymin:ymax, xmin:xmax]
+            bboxes[:, [0, 2]] = np.clip(bboxes[:, [0, 2]], x1b, x2b)
+            bboxes[:, [1, 3]] = np.clip(bboxes[:, [1, 3]], y1b, y2b)
             bboxes[:, [0, 2]] += x1a - x1b
             bboxes[:, [1, 3]] += y1a - y1b
             bboxes4.append(bboxes)
@@ -365,11 +376,14 @@ class Mosaic:
         bboxes4[:, [0, 2]] = np.clip(bboxes4[:, [0, 2]] - input_w / 2, 0, input_w)
         bboxes4[:, [1, 3]] = np.clip(bboxes4[:, [1, 3]] - input_h / 2, 0, input_h)
 
-        # img4 = img4[input_h // 2: input_h // 2 + input_h, input_w // 2: input_w // 2 + input_w]
+        img4 = img4[input_h // 2: input_h // 2 + input_h, input_w // 2: input_w // 2 + input_w]
 
         bboxes4 = _filter_bboxes_by_iou_area_ratio(
-            all_bboxes_copy, bboxes4, iou_threshold=0.25, area_threshold=64
+            all_bboxes_copy, bboxes4, iou_threshold=0.2, area_threshold=25
         )
+
+        # tools.draw_bboxes_on_image(img4, bboxes4, 'results/mosaic.jpg')
+        # assert 0
 
         return img4, bboxes4
 
