@@ -55,7 +55,7 @@ python predict.py --yaml yamls/visdrone.yaml --dataset visdrone --cfg model/cfg/
 
 We implement channel-prune method according [slimming][3]. And only support vanilla conv or deepwise conv now.
 
-First, turn on sparse train in yaml file and train. By default, we use 0.01 sparse ratio. You may need to use longer schedule or larger sparse ratio if bn's gama is large.
+First, turn on sparse train in yaml file and train. By default, we use 0.01 sparse ratio. You may need to use longer scheduler or larger sparse ratio if bn's gama is large.
 
 After sparse train, prune and fine-tune. For example:
 ```
@@ -73,7 +73,7 @@ These are based on experience, try yourself.
 You can also fine-tune from a trained model. That will save a lot of time.
 
 Currently we don't use multi GPUs in QAT in pytorch, see [this issue][4].
-So you need to reduce batch size and learn rate. QAT is much slower and consume more memory than normal training.
+So you need to reduce batch size and learning rate. QAT is much slower and consume more memory than normal training.
 
 ## Export to ONNX
 
@@ -86,7 +86,7 @@ We support exporting quantized model, see `export/onnx_exporter.py`.
 For now we implement MobileNetV2, RegnetX-600M and RegnetY-400M backbone.
 
 We basically implement a darknet cfg parser. Most of them have the same behavior.
-You can write cfg file by yourself and add more op. See file in `model/`.
+You can write cfg file by yourself and add more op. See files in `model/`.
 
 ## NAS
 
