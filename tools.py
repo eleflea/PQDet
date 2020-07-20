@@ -11,6 +11,7 @@ import torch
 from torch import nn
 from torchvision import ops
 import math
+import cv2
 
 # dont directly import interpreter and DetectionModel cause circular import
 from model.interpreter import DetectionModel
@@ -23,6 +24,15 @@ except ImportError:
     def time_ns():
         return int(time() * 1e9)
 
+
+def draw_bboxes_on_image(image, bboxes: np.ndarray, save_path: str):
+    for box in bboxes:
+        x1, y1, x2, y2, cls_index = [int(n) for n in box][:5]
+        cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        text = str(cls_index)
+        cv2.putText(image, text, (x1, y1-5), 0, 0.4, (0, 255, 0))
+    image = cv2.cvtColor(image.astype(np.float32), cv2.COLOR_RGB2BGR)
+    cv2.imwrite(save_path, image)
 
 AP = namedtuple('AP', ['mAPs', 'APs', 'AP', 'raw', 'class_names', 'iou_thresholds'])
 
