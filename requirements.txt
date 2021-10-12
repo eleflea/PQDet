@@ -1,4 +1,4 @@
-opencv_python==4.1.0.25
+opencv_python==4.1.1.26
 torch==1.5.0
 torchvision==0.6.0
 thop==0.0.31.post1909171951
