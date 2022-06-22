@@ -5,7 +5,7 @@ thop==0.0.31.post1909171951
 tqdm==4.36.1
 matplotlib==3.1.1
 yacs==0.1.6
-numpy==1.18.2
+numpy==1.22.0
 pyclustering==0.9.3.1
 onnx==1.6.0
 onnxruntime_gpu==1.2.0
